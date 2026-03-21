@@ -1,4 +1,6 @@
-import Link from "next/link";
+// GitHub Releases 다운로드 URL — 릴리스 업로드 후 이 URL로 자동 연결됨
+const DOWNLOAD_URL =
+  "https://github.com/cakemans81-source/talksync/releases/latest/download/TalkSync-Setup.exe";
 
 export default function Home() {
   return (
@@ -16,8 +18,8 @@ export default function Home() {
             <a className="text-zinc-500 hover:text-[#111111] transition-colors" href="#">Editorial</a>
           </div>
           <div className="flex items-center gap-6">
-            <Link href="/login" className="font-headline font-extralight tracking-tight text-sm text-zinc-500 hover:opacity-70 transition-opacity">로그인</Link>
-            <Link href="/login" className="bg-primary text-on-primary px-6 py-2 text-sm font-medium hover:opacity-90 active:scale-[0.99] transition-all">시작하기</Link>
+            <a href={DOWNLOAD_URL} className="font-headline font-extralight tracking-tight text-sm text-zinc-500 hover:opacity-70 transition-opacity">다운로드</a>
+            <a href={DOWNLOAD_URL} className="bg-primary text-on-primary px-6 py-2 text-sm font-medium hover:opacity-90 active:scale-[0.99] transition-all">Windows 다운로드</a>
           </div>
         </div>
       </nav>
@@ -33,9 +35,13 @@ export default function Home() {
             <p className="font-label text-sm uppercase tracking-[0.3em] text-outline mb-12">
               Real-time AI Voice Translation
             </p>
-            <Link href="/login" className="bg-on-background text-surface px-12 py-4 rounded-full font-medium hover:opacity-90 transition-all text-sm tracking-wider">
-              무료로 시작하기
-            </Link>
+            <a
+              href={DOWNLOAD_URL}
+              className="bg-on-background text-surface px-12 py-4 rounded-full font-medium hover:opacity-90 transition-all text-sm tracking-wider flex items-center gap-2"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              Windows용 다운로드 (무료)
+            </a>
           </div>
           <div className="relative w-full aspect-[21/9] bg-surface-container-low overflow-hidden group">
             {/* eslint-disable-next-line @next/next/no-img-element */}
