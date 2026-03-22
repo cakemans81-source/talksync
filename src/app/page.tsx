@@ -20,7 +20,6 @@ export default function Home() {
             <a className="text-zinc-500 hover:text-[#111111] transition-colors" href="#">Editorial</a>
           </div>
           <div className="flex items-center gap-6">
-            <a href={DOWNLOAD_URL} className="font-headline font-extralight tracking-tight text-sm text-zinc-500 hover:opacity-70 transition-opacity">다운로드</a>
             <a href={DOWNLOAD_URL} className="bg-primary text-on-primary px-6 py-2 text-sm font-medium hover:opacity-90 active:scale-[0.99] transition-all">Windows 다운로드</a>
           </div>
         </div>
