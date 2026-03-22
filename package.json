@@ -1,6 +1,8 @@
 {
   "name": "talksync",
   "version": "0.1.0",
+  "description": "Real-time speech-to-speech translation for Discord & Teams",
+  "author": "TalkSync",
   "private": true,
   "main": "electron-dist/main.js",
   "scripts": {
@@ -12,7 +14,10 @@
     "electron:compile": "tsc -p electron/tsconfig.json",
     "electron:dev": "concurrently -n NEXT,ELECTRON -c cyan,yellow \"npm run dev\" \"wait-on http://localhost:3000 && npm run electron:compile && electron .\"",
     "electron:build": "cross-env ELECTRON_BUILD=true next build && npm run electron:compile && electron-builder",
-    "electron:build:win": "cross-env ELECTRON_BUILD=true next build && npm run electron:compile && electron-builder --win"
+    "electron:build:win": "cross-env ELECTRON_BUILD=true next build && npm run electron:compile && electron-builder --win",
+    "build:app": "cross-env ELECTRON_BUILD=true next build && npm run electron:compile",
+    "package": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --publish never",
+    "package:all": "npm run build:app && npm run package"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -41,11 +46,22 @@
   "build": {
     "appId": "com.talksync.app",
     "productName": "TalkSync",
-    "directories": { "output": "dist-electron" },
+    "copyright": "Copyright © 2025 TalkSync",
+    "asar": true,
+    "directories": {
+      "output": "dist-electron",
+      "buildResources": "build"
+    },
     "files": [
       "out/**/*",
       "electron-dist/**/*",
-      "package.json"
+      "package.json",
+      "!**/.env",
+      "!**/.env.*",
+      "!**/*.local",
+      "!**/node_modules/**",
+      "!**/src/**",
+      "!**/electron/**"
     ],
     "protocols": [
       {
@@ -55,11 +71,24 @@
     ],
     "win": {
       "target": [{ "target": "nsis", "arch": ["x64"] }],
-      "icon": "public/favicon.ico"
+      "icon": "build/icon.ico",
+      "artifactName": "TalkSync-Setup-${version}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "TalkSync",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "deleteAppDataOnUninstall": false
     },
     "mac": {
       "target": "dmg",
-      "category": "public.app-category.utilities"
+      "category": "public.app-category.utilities",
+      "icon": "build/icon.ico"
     },
     "linux": {
       "target": "AppImage"

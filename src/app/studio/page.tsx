@@ -7,8 +7,13 @@ import { SUPPORTED_LANGUAGES } from '@/lib/stt';
 import { validateGeminiKey } from '@/lib/gemini';
 import { encryptApiKey, decryptApiKey, cacheApiKeyInSession, getCachedApiKey, saveKeyLocally, loadKeyLocally } from '@/lib/crypto';
 import { getSupabaseClient, getCurrentUser, saveEncryptedKey, loadEncryptedKey } from '@/lib/supabase';
+import { loadUserSettings, saveUserSettings } from '@/lib/userSettings';
 import { DeviceSelector } from '@/components/audio/DeviceSelector';
-import { TTS_VOICE_PRESETS } from '@/lib/tts';
+import {
+  TTS_VOICE_PRESETS, ELEVENLABS_VOICE_PRESETS, GEMINI_TTS_VOICE_PRESETS,
+  fetchElevenLabsVoices, buildElevenLabsLabel,
+  type TTSEngine, type ElevenLabsVoice,
+} from '@/lib/tts';
 
 // ── 음성 레벨 바 ──────────────────────────────
 function LevelBar({ level, color = 'bg-zinc-900' }: { level: number; color?: string }) {
@@ -413,8 +418,20 @@ export default function StudioPage() {
   const [micDeviceId, setMicDeviceId] = useState('default');
   const [virtualMicDeviceId, setVirtualMicDeviceId] = useState('default');
   const [earphoneDeviceId, setEarphoneDeviceId] = useState('default');
-  const [ttsVoice, setTtsVoice] = useState('Aoede'); // localStorage에서 복원
+  const [ttsEngine, setTtsEngine] = useState<TTSEngine>('edge');
+  const [ttsVoice, setTtsVoice] = useState('ko-KR-SunHiNeural'); // localStorage에서 복원
   const [ttsRate, setTtsRate] = useState(1.0);       // 말하기 속도 — localStorage에서 복원
+  const [elevenLabsApiKey, setElevenLabsApiKey] = useState('');  // ElevenLabs API 키
+
+  // ── ElevenLabs 동적 보이스 패치 상태 ──────────
+  const [elVoices, setElVoices] = useState<{ id: string; label: string; previewUrl?: string }[]>(ELEVENLABS_VOICE_PRESETS);
+  const [elVoicesLoading, setElVoicesLoading] = useState(false);
+  const [elVoicesError, setElVoicesError] = useState<string | null>(null);
+  const elFetchedKeyRef = useRef<string>(''); // 중복 패치 방지
+
+  // ── ElevenLabs 보이스 미리 듣기 상태 ──────────
+  const [elPreviewState, setElPreviewState] = useState<'idle' | 'loading' | 'playing'>('idle');
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const [micLevel, setMicLevel] = useState(0);
   const [sysLevel, setSysLevel] = useState(0);
@@ -427,14 +444,58 @@ export default function StudioPage() {
     setIsElectron(detected);
   }, []);
 
-  // ── TTS 음성·속도 설정 복원 ───────────────────
+  // ── TTS 엔진·음성·속도 설정 복원 ──────────────
   useEffect(() => {
-    const savedVoice = localStorage.getItem('ttsVoice');
-    if (savedVoice && TTS_VOICE_PRESETS.some((p) => p.id === savedVoice)) setTtsVoice(savedVoice);
+    const defaultVoices: Record<TTSEngine, string> = {
+      edge: 'ko-KR-SunHiNeural',
+      elevenlabs: '21m00Tcm4TlvDq8ikWAM',
+      gemini: 'Aoede',
+    };
+    const savedEngine = (localStorage.getItem('ttsEngine') ?? 'edge') as TTSEngine;
+    setTtsEngine(savedEngine);
+
+    const savedVoice = localStorage.getItem(`ttsVoice_${savedEngine}`);
+    setTtsVoice(savedVoice ?? defaultVoices[savedEngine]);
 
     const savedRate = parseFloat(localStorage.getItem('ttsRate') ?? '');
     if (!isNaN(savedRate) && savedRate >= 0.5 && savedRate <= 2.0) setTtsRate(savedRate);
+
+    // ElevenLabs 키는 userId 확정 후 loadUserSettings()에서 로드 (아래 인증 useEffect)
   }, []);
+
+  // ── ElevenLabs 보이스 동적 패치 ──────────────
+  // 조건: ElevenLabs 엔진 선택 + 유효한 API 키 입력
+  // 동일 키로 중복 패치 방지 (elFetchedKeyRef)
+  useEffect(() => {
+    if (ttsEngine !== 'elevenlabs' || !elevenLabsApiKey.trim()) return;
+    if (elFetchedKeyRef.current === elevenLabsApiKey) return; // 이미 패치한 키
+
+    let cancelled = false;
+    setElVoicesLoading(true);
+    setElVoicesError(null);
+
+    fetchElevenLabsVoices(elevenLabsApiKey)
+      .then((voices: ElevenLabsVoice[]) => {
+        if (cancelled) return;
+        elFetchedKeyRef.current = elevenLabsApiKey;
+        const mapped = voices.map((v) => ({ id: v.voice_id, label: buildElevenLabsLabel(v), previewUrl: v.preview_url }));
+        setElVoices(mapped);
+        // 현재 선택된 voice_id가 새 목록에 없으면 첫 번째 항목으로 리셋
+        if (mapped.length > 0 && !mapped.some((v) => v.id === ttsVoice)) {
+          setTtsVoice(mapped[0].id);
+          localStorage.setItem('ttsVoice_elevenlabs', mapped[0].id);
+        }
+      })
+      .catch((err: Error) => {
+        if (cancelled) return;
+        const msg = `ElevenLabs 보이스 로드 실패: ${err.message}`;
+        setElVoicesError(msg);
+        setElVoices(ELEVENLABS_VOICE_PRESETS); // 하드코딩 프리셋 폴백
+      })
+      .finally(() => { if (!cancelled) setElVoicesLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [ttsEngine, elevenLabsApiKey]); // ttsVoice는 의도적으로 제외 (패치 트리거 아님)
 
   // ── 인증 체크 + API 키 로드 ─────────────────
   useEffect(() => {
@@ -445,6 +506,10 @@ export default function StudioPage() {
         return;
       }
       setUserId(user.id);
+
+      // ElevenLabs API 키 — 유저별 격리 스토리지에서 자동 로드
+      const { elevenLabsApiKey: savedElKey } = loadUserSettings(user.id);
+      if (savedElKey) setElevenLabsApiKey(savedElKey);
 
       // 1순위: 세션 캐시 (동일 세션 내 빠른 접근)
       const cached = getCachedApiKey();
@@ -525,9 +590,75 @@ export default function StudioPage() {
 
   // ── 로그아웃 ────────────────────────────────
   async function handleLogout() {
+    // 메모리에 올라간 API 키 즉시 초기화 — 다음 사용자가 볼 수 없도록
+    stopPreview();
+    setElevenLabsApiKey('');
+    elFetchedKeyRef.current = ''; // 다음 로그인 시 새 키로 재패치 허용
+    setElVoices(ELEVENLABS_VOICE_PRESETS); // 동적 목록 초기화
     const supabase = getSupabaseClient();
     await supabase.auth.signOut();
     router.replace('/login');
+  }
+
+  // ── ElevenLabs 미리 듣기 제어 ──────────────────
+  function stopPreview() {
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current.src = '';
+      previewAudioRef.current = null;
+    }
+    setElPreviewState('idle');
+  }
+
+  async function handlePreview() {
+    const voice = elVoices.find((v) => v.id === ttsVoice);
+    if (!voice?.previewUrl) return;
+
+    if (elPreviewState === 'playing') {
+      stopPreview();
+      return;
+    }
+
+    stopPreview();
+    setElPreviewState('loading');
+
+    const audio = new Audio(voice.previewUrl);
+    previewAudioRef.current = audio;
+
+    // ── 핵심: 이어폰 출력 장치로 명시적 고정 ──────────────
+    // VB-Cable(가상 마이크)로 라우팅되지 않도록
+    // earphoneDeviceId가 'default'이면 빈 문자열(시스템 기본값)로 설정
+    const sinkId = earphoneDeviceId !== 'default' ? earphoneDeviceId : '';
+    if (typeof (audio as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }).setSinkId === 'function') {
+      try {
+        await (audio as HTMLAudioElement & { setSinkId: (id: string) => Promise<void> }).setSinkId(sinkId);
+      } catch { /* setSinkId 실패 시 시스템 기본값으로 폴백 */ }
+    }
+
+    audio.oncanplay = () => setElPreviewState('playing');
+    audio.onended = () => { previewAudioRef.current = null; setElPreviewState('idle'); };
+    audio.onerror = () => { previewAudioRef.current = null; setElPreviewState('idle'); };
+
+    try {
+      await audio.play();
+    } catch {
+      previewAudioRef.current = null;
+      setElPreviewState('idle');
+    }
+  }
+
+  // ── TTS 엔진 변경 ────────────────────────────
+  function handleEngineChange(engine: TTSEngine) {
+    const defaultVoices: Record<TTSEngine, string> = {
+      edge: 'ko-KR-SunHiNeural',
+      elevenlabs: '21m00Tcm4TlvDq8ikWAM',
+      gemini: 'Aoede',
+    };
+    setTtsEngine(engine);
+    localStorage.setItem('ttsEngine', engine);
+    const savedVoice = localStorage.getItem(`ttsVoice_${engine}`);
+    const voice = savedVoice ?? defaultVoices[engine];
+    setTtsVoice(voice);
   }
 
   // ── 통역 시작 ────────────────────────────────
@@ -536,7 +667,8 @@ export default function StudioPage() {
     const config: PipelineConfig = {
       micLang, sysLang, apiKey,
       micDeviceId, virtualMicDeviceId, earphoneDeviceId,
-      ttsVoice, ttsRate,
+      ttsEngine, ttsVoice, ttsRate,
+      elevenLabsApiKey: elevenLabsApiKey || undefined,
     };
     await pipeline.start(config);
   }
@@ -562,6 +694,22 @@ export default function StudioPage() {
       {/* 가상 오디오 케이블 설치 가드 — 미설치 시 전체 UI 차단 */}
       {virtualCableReady === false && (
         <VirtualCableGuard onDetected={() => setVirtualCableReady(true)} />
+      )}
+
+      {/* TTS 폴백 토스트 — 엔진 실패 시 Edge TTS로 자동 전환 알림 */}
+      {pipeline.ttsWarning && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[150] bg-amber-800 text-white px-4 py-3 rounded-2xl shadow-2xl text-sm flex items-center gap-2 max-w-sm">
+          <span className="text-base">⚠️</span>
+          <span>{pipeline.ttsWarning}</span>
+        </div>
+      )}
+
+      {/* ElevenLabs 보이스 패치 에러 토스트 */}
+      {elVoicesError && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-[150] bg-red-700 text-white px-4 py-3 rounded-2xl shadow-2xl text-sm flex items-center gap-2 max-w-sm">
+          <span className="text-base">🔑</span>
+          <span>{elVoicesError} — 기본 프리셋으로 대체됩니다</span>
+        </div>
       )}
 
       {/* API 키 모달 */}
@@ -781,48 +929,123 @@ export default function StudioPage() {
                 value={earphoneDeviceId}
                 onChange={(id) => { setEarphoneDeviceId(id); pipeline.setEarphoneDevice(id); }}
               />
-              {/* TTS 음성 선택 */}
+              {/* TTS 엔진 선택 */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium text-zinc-500">TTS 엔진</label>
+                <select
+                  value={ttsEngine}
+                  onChange={(e) => handleEngineChange(e.target.value as TTSEngine)}
+                  disabled={isRunning}
+                  className="h-9 px-3 text-sm bg-white border border-zinc-200 rounded-xl text-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-300 cursor-pointer disabled:opacity-50"
+                >
+                  <option value="edge">🆓 Edge TTS — 무료 무제한</option>
+                  <option value="gemini">✨ Gemini TTS — 표준</option>
+                  <option value="elevenlabs">🎙 ElevenLabs — 초고음질</option>
+                </select>
+              </div>
+
+              {/* ElevenLabs API 키 — ElevenLabs 선택 시만 표시 */}
+              {ttsEngine === 'elevenlabs' && (
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-medium text-zinc-500">ElevenLabs API 키</label>
+                  <input
+                    type="password"
+                    value={elevenLabsApiKey}
+                    onChange={(e) => setElevenLabsApiKey(e.target.value)}
+                    onBlur={(e) => { if (userId) saveUserSettings(userId, { elevenLabsApiKey: e.target.value }); }}
+                    placeholder="sk_..."
+                    className={`h-9 px-3 text-sm font-mono bg-white border rounded-xl text-zinc-800 focus:outline-none focus:ring-2 transition w-44 ${
+                      elevenLabsApiKey ? 'border-green-300 focus:ring-green-200' : 'border-amber-300 focus:ring-amber-200'
+                    }`}
+                  />
+                </div>
+              )}
+
+              {/* TTS 음성 선택 — 엔진에 따라 옵션 변경 */}
               <div className="flex flex-col gap-1.5">
                 <label className="text-xs font-medium text-zinc-500">TTS 음성</label>
+                <div className="flex items-center gap-1.5">
                 <select
                   value={ttsVoice}
                   onChange={(e) => {
                     setTtsVoice(e.target.value);
-                    localStorage.setItem('ttsVoice', e.target.value);
+                    localStorage.setItem(`ttsVoice_${ttsEngine}`, e.target.value);
+                    if (ttsEngine === 'elevenlabs') stopPreview();
                   }}
-                  className="h-9 px-3 text-sm bg-white border border-zinc-200 rounded-xl text-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-300 cursor-pointer"
+                  disabled={isRunning}
+                  className="h-9 px-3 text-sm bg-white border border-zinc-200 rounded-xl text-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-300 cursor-pointer disabled:opacity-50"
                 >
-                  {TTS_VOICE_PRESETS.map((p) => (
+                  {ttsEngine === 'edge' && TTS_VOICE_PRESETS.map((p) => (
+                    <option key={p.id} value={p.id}>{p.label}</option>
+                  ))}
+                  {ttsEngine === 'elevenlabs' && elVoicesLoading && (
+                    <option disabled value="">보이스 목록 불러오는 중...</option>
+                  )}
+                  {ttsEngine === 'elevenlabs' && !elVoicesLoading && elVoices.map((p) => (
+                    <option key={p.id} value={p.id}>{p.label}</option>
+                  ))}
+
+                  {ttsEngine === 'gemini' && GEMINI_TTS_VOICE_PRESETS.map((p) => (
                     <option key={p.id} value={p.id}>{p.label}</option>
                   ))}
                 </select>
+                {/* ElevenLabs 보이스 미리 듣기 버튼 */}
+                {ttsEngine === 'elevenlabs' && elVoices.find((v) => v.id === ttsVoice)?.previewUrl && (
+                  <button
+                    type="button"
+                    onClick={handlePreview}
+                    title={elPreviewState === 'playing' ? '미리 듣기 정지' : '미리 듣기'}
+                    className={`h-9 w-9 flex-shrink-0 flex items-center justify-center rounded-xl border transition-colors ${
+                      elPreviewState === 'playing'
+                        ? 'bg-zinc-900 border-zinc-900 text-white'
+                        : 'bg-white border-zinc-200 text-zinc-600 hover:bg-zinc-50'
+                    }`}
+                  >
+                    {elPreviewState === 'loading' ? (
+                      <span className="w-3.5 h-3.5 border-2 border-zinc-300 border-t-zinc-700 rounded-full animate-spin" />
+                    ) : elPreviewState === 'playing' ? (
+                      /* 정지 아이콘 */
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                        <rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>
+                      </svg>
+                    ) : (
+                      /* 재생 아이콘 */
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M8 5v14l11-7z"/>
+                      </svg>
+                    )}
+                  </button>
+                )}
+                </div>
               </div>
 
-              {/* TTS 말하기 속도 */}
-              <div className="flex flex-col gap-1.5 min-w-[120px]">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-medium text-zinc-500">말하기 속도</label>
-                  <span className="text-xs font-semibold text-zinc-700 tabular-nums">{ttsRate.toFixed(1)}x</span>
+              {/* TTS 말하기 속도 — Edge TTS 전용 */}
+              {ttsEngine === 'edge' && (
+                <div className="flex flex-col gap-1.5 min-w-[120px]">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-zinc-500">말하기 속도</label>
+                    <span className="text-xs font-semibold text-zinc-700 tabular-nums">{ttsRate.toFixed(1)}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={2.0}
+                    step={0.1}
+                    value={ttsRate}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      setTtsRate(val);
+                      localStorage.setItem('ttsRate', String(val));
+                    }}
+                    className="h-1.5 w-full appearance-none rounded-full bg-zinc-200 accent-zinc-900 cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[10px] text-zinc-300">
+                    <span>0.5x</span>
+                    <span>1.0x</span>
+                    <span>2.0x</span>
+                  </div>
                 </div>
-                <input
-                  type="range"
-                  min={0.5}
-                  max={2.0}
-                  step={0.1}
-                  value={ttsRate}
-                  onChange={(e) => {
-                    const val = parseFloat(e.target.value);
-                    setTtsRate(val);
-                    localStorage.setItem('ttsRate', String(val));
-                  }}
-                  className="h-1.5 w-full appearance-none rounded-full bg-zinc-200 accent-zinc-900 cursor-pointer"
-                />
-                <div className="flex justify-between text-[10px] text-zinc-300">
-                  <span>0.5x</span>
-                  <span>1.0x</span>
-                  <span>2.0x</span>
-                </div>
-              </div>
+              )}
             </div>
 
             {/* 오른쪽: 레벨 + 버튼 */}

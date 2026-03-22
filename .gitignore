@@ -39,6 +39,7 @@ yarn-error.log*
 # electron build outputs
 /electron-dist/
 /dist-electron/
+/out/
 
 # local dev tools
 .mcp.json

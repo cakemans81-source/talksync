@@ -1,10 +1,17 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { app, BrowserWindow, ipcMain, desktopCapturer, shell } = require('electron') as typeof import('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, shell, protocol, net } = require('electron') as typeof import('electron');
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { execFile } from 'child_process';
 import fs from 'fs';
 
 const PROTOCOL = 'talksync';
+
+// app:// 커스텀 프로토콜 — file:// 대신 사용하여 서브 페이지에서도 에셋 경로가 항상 out/ 루트 기준으로 해석됨
+// (app.whenReady() 호출 전에 등록해야 함)
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'app', privileges: { secure: true, standard: true, supportFetchAPI: true } },
+]);
 const isDev = !app.isPackaged;
 
 // ── 단일 인스턴스 강제 ────────────────────────────────────────────
@@ -37,14 +44,22 @@ function createWindow(): void {
     },
   });
 
-  // 마이크 / 음성인식 권한 자동 허용 (Web Speech API용)
+  // 마이크 / 음성인식 / 오디오 출력 장치 선택 권한 자동 허용
+  // speaker-selection: AudioContext.setSinkId / HTMLAudioElement.setSinkId 가 VB-Cable 등
+  //   특정 출력 장치로 라우팅할 때 필요 (Electron 권한명 — audiooutput 아님)
   mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
-    const allowed = ['microphone', 'media', 'audioCapture', 'speechRecognition'];
+    const allowed = ['microphone', 'media', 'audioCapture', 'speechRecognition', 'speaker-selection'];
     callback(allowed.includes(permission));
   });
   mainWindow.webContents.session.setPermissionCheckHandler((_wc, permission) => {
-    const allowed = ['microphone', 'media', 'audioCapture', 'speechRecognition'];
+    const allowed = ['microphone', 'media', 'audioCapture', 'speechRecognition', 'speaker-selection'];
     return allowed.includes(permission);
+  });
+
+  // Electron 20+: 미디어 장치(마이크, 카메라, 스피커) 선택 권한을 묻지 않고 항상 허용
+  // setSinkId로 VB-Cable 등 특정 출력 장치로 오디오를 라우팅하려면 이 핸들러가 반드시 필요
+  mainWindow.webContents.session.setDevicePermissionHandler((_details) => {
+    return true; // 모든 미디어 장치 권한 무조건 허용
   });
 
   // Electron 27+: getUserMedia({ chromeMediaSource:'desktop' }) 허용
@@ -58,11 +73,33 @@ function createWindow(): void {
     mainWindow.loadURL('http://localhost:3000');
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../out/index.html'));
+    mainWindow.loadURL('app://localhost/studio/index.html');
   }
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  // app:// 요청을 out/ 폴더의 정적 파일로 라우팅
+  const outDir = path.join(__dirname, '../out');
+  protocol.handle('app', (request) => {
+    const { pathname } = new URL(request.url);
+    const filePath = path.join(outDir, pathname);
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
+
+  createWindow();
+
+  // ── Edge TTS WebSocket 403 수정 ───────────────────────────────
+  // app:// 프로토콜의 Origin 헤더("app://localhost")를 Microsoft 서버가 거부함
+  // Chrome Extension Origin으로 교체하여 정상 연결 허용
+  const { session } = require('electron') as typeof import('electron');
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['wss://speech.platform.bing.com/*'] },
+    (details: { requestHeaders: Record<string, string> }, callback: (r: { requestHeaders: Record<string, string> }) => void) => {
+      details.requestHeaders['Origin'] = 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold';
+      callback({ requestHeaders: details.requestHeaders });
+    }
+  );
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

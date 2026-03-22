@@ -1,3 +1,5 @@
+import { TrustSection } from '@/components/landing/TrustSection';
+
 // GitHub Releases 다운로드 URL — 릴리스 업로드 후 이 URL로 자동 연결됨
 const DOWNLOAD_URL =
   "https://github.com/cakemans81-source/talksync/releases/latest/download/TalkSync-Setup.exe";
@@ -133,6 +135,9 @@ export default function Home() {
             <p className="font-label text-[10px] uppercase tracking-widest text-outline">Advertisement · 728 × 90</p>
           </div>
         </section>
+
+        {/* Trust & Security */}
+        <TrustSection />
 
         {/* Interstitial */}
         <section className="py-40 flex flex-col items-center justify-center bg-zinc-950 text-surface overflow-hidden relative">

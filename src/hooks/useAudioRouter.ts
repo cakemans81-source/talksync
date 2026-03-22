@@ -30,6 +30,9 @@ export type AudioDevice = {
   kind: MediaDeviceKind;
 };
 
+// AudioContext 확장 타입 — setSinkId는 Chrome 110+ 지원
+type AudioContextWithSink = AudioContext & { setSinkId?: (id: string) => Promise<void> };
+
 class AudioRouter {
   private ctx: AudioContext;
   private micSource: MediaStreamAudioSourceNode | null = null;
@@ -37,11 +40,15 @@ class AudioRouter {
   private sysSource: MediaStreamAudioSourceNode | null = null;
   private sysAnalyser: AnalyserNode;
 
-  // [가상 마이크 핵심 구조]
-  // Web Audio 파이프: source.connect(virtualMicDest)
-  //   → virtualMicAudioEl.srcObject = virtualMicDest.stream
-  //   → setSinkId("CABLE Input") → VB-Cable Input으로 재생
-  //   → Discord는 "CABLE Output"을 마이크로 인식
+  // [가상 마이크 핵심 구조 — AudioContext.setSinkId 방식]
+  // MP3 → virtualMicCtx(AudioContext) → setSinkId("CABLE Input") → VB-Cable Input
+  // → Discord는 "CABLE Output"을 마이크로 인식
+  // HTMLAudioElement.setSinkId 대신 AudioContext.setSinkId 사용 — 더 신뢰성 높음
+  private virtualMicCtx: AudioContextWithSink | null = null;
+  // virtualMicCtx를 항상 활성 상태로 유지하는 무음 소스
+  // TTS 없는 순간에도 CABLE Input에 신호를 보내 Discord가 연결을 끊지 않도록 함
+  private silentKeepAlive: ConstantSourceNode | null = null;
+  // 기존 Web Audio stream 방식 (startVirtualMicPlayback 호환성 유지)
   private virtualMicDest: MediaStreamAudioDestinationNode;
   private virtualMicAudioEl: HTMLAudioElement | null = null;
   private virtualMicDeviceId: string = 'default';
@@ -62,6 +69,43 @@ class AudioRouter {
     this.sysAnalyser = this.ctx.createAnalyser();
     this.sysAnalyser.fftSize = 2048;
     this.virtualMicDest = this.ctx.createMediaStreamDestination();
+  }
+
+  // ── VirtualMic 전용 AudioContext 초기화 ──────
+  // AudioContext.setSinkId()로 CABLE Input에 직접 바인딩
+  // + 무음 ConstantSourceNode로 컨텍스트를 상시 활성 상태 유지
+  //   → Discord가 CABLE Output을 "활성 마이크"로 지속 인식
+  private async getVirtualMicCtx(): Promise<AudioContextWithSink> {
+    if (!this.virtualMicCtx) {
+      this.virtualMicCtx = new AudioContext() as AudioContextWithSink;
+      console.log('[AudioRouter] VirtualMic AudioContext 생성');
+      console.log('[AudioRouter] AudioContext.setSinkId 지원:', typeof this.virtualMicCtx.setSinkId === 'function');
+      await this.applyCtxSinkId(this.virtualMicCtx, this.virtualMicDeviceId);
+
+      // 무음(0 게인) 상시 신호 → CABLE Input 연결 유지
+      const silentGain = this.virtualMicCtx.createGain();
+      silentGain.gain.value = 0;
+      this.silentKeepAlive = this.virtualMicCtx.createConstantSource();
+      this.silentKeepAlive.connect(silentGain);
+      silentGain.connect(this.virtualMicCtx.destination);
+      this.silentKeepAlive.start();
+    }
+    if (this.virtualMicCtx.state === 'suspended') await this.virtualMicCtx.resume();
+    return this.virtualMicCtx;
+  }
+
+  private async applyCtxSinkId(ctx: AudioContextWithSink, deviceId: string): Promise<void> {
+    console.log('[AudioRouter] AudioContext.setSinkId 시도 → deviceId:', deviceId);
+    try {
+      if (typeof ctx.setSinkId === 'function') {
+        await ctx.setSinkId(deviceId);
+        console.log('[AudioRouter] AudioContext.setSinkId 성공 ✓ → deviceId:', deviceId);
+      } else {
+        console.error('[AudioRouter] AudioContext.setSinkId 미지원 — Electron/Chrome 버전 확인 필요');
+      }
+    } catch (e) {
+      console.error('[AudioRouter] AudioContext.setSinkId 실패:', (e as Error)?.message ?? e, '| deviceId:', deviceId);
+    }
   }
 
   // ── 장치 목록 조회 ───────────────────────────
@@ -92,6 +136,9 @@ class AudioRouter {
 
   async setVirtualMicDevice(deviceId: string): Promise<void> {
     this.virtualMicDeviceId = deviceId;
+    // AudioContext.setSinkId로 실시간 라우팅 장치 변경
+    if (this.virtualMicCtx) await this.applyCtxSinkId(this.virtualMicCtx, deviceId);
+    // HTMLAudioElement 방식 폴백도 업데이트
     if (this.virtualMicAudioEl) await this.applySinkId(this.virtualMicAudioEl, deviceId);
   }
 
@@ -164,11 +211,46 @@ class AudioRouter {
     });
   }
 
+  // ── MP3 ArrayBuffer → 가상 마이크 (VB-Cable) ─
+  // AudioContext.setSinkId()로 CABLE Input에 직접 라우팅 (Chrome 110+)
+  // HTMLAudioElement.setSinkId보다 신뢰성 높음
+  async routeMP3ToVirtualMic(mp3: ArrayBuffer): Promise<void> {
+    const ctx = await this.getVirtualMicCtx();
+    const audioBuffer = await ctx.decodeAudioData(mp3.slice(0));
+    return new Promise((resolve) => {
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+      source.onended = () => resolve();
+      source.start();
+    });
+  }
+
+  // ── Blob → 가상 마이크 (AudioContext.setSinkId 적용) ─
+  async playBlobToVirtualMic(blob: Blob): Promise<void> {
+    const arrayBuffer = await blob.arrayBuffer();
+    return this.routeMP3ToVirtualMic(arrayBuffer);
+  }
+
   // ── Blob → 이어폰 (setSinkId 적용) ──────────
   async playBlobToEarphone(blob: Blob): Promise<void> {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
-    await this.applySinkId(audio, this.earphoneDeviceId);
+
+    console.log('[AudioRouter] Earphone Target Device ID:', this.earphoneDeviceId);
+
+    try {
+      const audioWithSink = audio as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
+      if (typeof audioWithSink.setSinkId === 'function') {
+        await audioWithSink.setSinkId(this.earphoneDeviceId);
+        console.log('[AudioRouter] setSinkId(earphone) 성공:', this.earphoneDeviceId);
+      } else {
+        console.error('[AudioRouter] setSinkId 미지원 — Chrome 71+ 필요');
+      }
+    } catch (e) {
+      console.error('[AudioRouter] setSinkId(earphone) 실패:', e, '| deviceId:', this.earphoneDeviceId);
+    }
+
     await audio.play();
     return new Promise((r) => {
       audio.onended = () => { URL.revokeObjectURL(url); r(); };
@@ -295,6 +377,10 @@ class AudioRouter {
     this.stopAllTTS();
     this.virtualMicAudioEl?.pause();
     this.virtualMicAudioEl = null;
+    try { this.silentKeepAlive?.stop(); } catch { /* 이미 종료됨 */ }
+    this.silentKeepAlive = null;
+    this.virtualMicCtx?.close();
+    this.virtualMicCtx = null;
     this.micStream?.getTracks().forEach((t) => t.stop());
     this.sysStream?.getTracks().forEach((t) => t.stop());
     this.micSource?.disconnect();
@@ -331,6 +417,8 @@ export function useAudioRouter() {
   const startVirtualMicPlayback = useCallback(async () => getRouter().startVirtualMicPlayback(), [getRouter]);
   const routeTTSToVirtualMic = useCallback(async (buf: AudioBuffer) => getRouter().routeTTSToVirtualMic(buf), [getRouter]);
   const routeTTSToEarphone = useCallback(async (buf: AudioBuffer) => getRouter().routeTTSToEarphone(buf), [getRouter]);
+  const routeMP3ToVirtualMic = useCallback(async (mp3: ArrayBuffer) => getRouter().routeMP3ToVirtualMic(mp3), [getRouter]);
+  const playBlobToVirtualMic = useCallback(async (blob: Blob) => getRouter().playBlobToVirtualMic(blob), [getRouter]);
   const stopAllTTS = useCallback(() => getRouter().stopAllTTS(), [getRouter]);
   const playBlobToEarphone = useCallback(async (blob: Blob) => getRouter().playBlobToEarphone(blob), [getRouter]);
   const getVirtualMicStream = useCallback(() => getRouter().getVirtualMicStream(), [getRouter]);
@@ -358,7 +446,7 @@ export function useAudioRouter() {
     devices, refreshDevices,
     captureMic, captureSystemAudio,
     setMicDevice, setVirtualMicDevice, setEarphoneDevice, startVirtualMicPlayback,
-    routeTTSToVirtualMic, routeTTSToEarphone, playBlobToEarphone, stopAllTTS,
+    routeTTSToVirtualMic, routeTTSToEarphone, routeMP3ToVirtualMic, playBlobToVirtualMic, playBlobToEarphone, stopAllTTS,
     getVirtualMicStream, getMicLevel, getSysLevel, startVAD,
     getMicStream, getSysStream,
     get isMicActive() { return routerRef.current?.isMicActive ?? false; },

@@ -1,7 +1,9 @@
-import { createBrowserClient } from '@supabase/ssr';
+import { createClient } from '@supabase/supabase-js';
 
 // ─────────────────────────────────────────────
-// Supabase 클라이언트 (브라우저용)
+// Supabase 클라이언트 (브라우저/Electron용)
+// createClient (localStorage 기반) 사용 — Electron 정적 앱에서
+// createBrowserClient(쿠키 기반)는 세션이 유지되지 않음
 // ─────────────────────────────────────────────
 
 export type ProfileRow = {
@@ -11,7 +13,7 @@ export type ProfileRow = {
 };
 
 export function createSupabaseClient() {
-  return createBrowserClient(
+  return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   );

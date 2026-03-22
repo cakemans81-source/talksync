@@ -1,166 +1,155 @@
 'use client';
 
 // ─────────────────────────────────────────────
-// TTS — gemini-2.5-flash-preview-tts
-// 응답: Raw PCM LINEAR16 (24kHz, mono, little-endian)
+// TTS — Microsoft Edge TTS (Azure Neural)
+// WebSocket 방식 — API 키 불필요, 무제한 사용
+// 출력: MP3 (audio-24khz-48kbitrate-mono-mp3)
 // ─────────────────────────────────────────────
 
-export type TTSOptions = {
-  lang: string;   // e.g. 'en-US', 'ko-KR'
-  rate?: number;  // 호환성 유지용, 미사용
-  voice?: string; // Gemini TTS 보이스 이름 (미지정 시 언어 기본값)
-};
-
-// ── TTS 보이스 프리셋 ─────────────────────────
-// Gemini 보이스 이름을 기준으로 브라우저 TTS 성별 매핑에도 활용
 export type TTSVoicePreset = {
-  id: string;             // Gemini voice name (API 파라미터)
-  label: string;          // UI 표시 이름
+  id: string;      // Edge TTS voice name (SSML 파라미터)
+  label: string;   // UI 표시 이름
   gender: 'female' | 'male';
 };
 
+// Edge TTS Neural 보이스 프리셋
 export const TTS_VOICE_PRESETS: TTSVoicePreset[] = [
-  { id: 'Aoede',  label: '여성 1 — Aoede',  gender: 'female' },
-  { id: 'Zephyr', label: '여성 2 — Zephyr', gender: 'female' },
-  { id: 'Kore',   label: '여성 3 — Kore',   gender: 'female' },
-  { id: 'Charon', label: '남성 1 — Charon', gender: 'male'   },
-  { id: 'Fenrir', label: '남성 2 — Fenrir', gender: 'male'   },
-  { id: 'Puck',   label: '남성 3 — Puck',   gender: 'male'   },
+  { id: 'ko-KR-SunHiNeural',    label: '한국어 여성 — SunHi',    gender: 'female' },
+  { id: 'ko-KR-InJoonNeural',   label: '한국어 남성 — InJoon',   gender: 'male'   },
+  { id: 'en-US-JennyNeural',    label: '영어 여성 — Jenny',      gender: 'female' },
+  { id: 'en-US-GuyNeural',      label: '영어 남성 — Guy',        gender: 'male'   },
+  { id: 'ja-JP-NanamiNeural',   label: '일본어 여성 — Nanami',   gender: 'female' },
+  { id: 'ja-JP-KeitaNeural',    label: '일본어 남성 — Keita',    gender: 'male'   },
+  { id: 'zh-CN-XiaoxiaoNeural', label: '중국어 여성 — Xiaoxiao', gender: 'female' },
+  { id: 'zh-CN-YunxiNeural',    label: '중국어 남성 — Yunxi',    gender: 'male'   },
+  { id: 'fr-FR-DeniseNeural',   label: '프랑스어 여성 — Denise', gender: 'female' },
+  { id: 'de-DE-KatjaNeural',    label: '독일어 여성 — Katja',    gender: 'female' },
+  { id: 'es-ES-ElviraNeural',   label: '스페인어 여성 — Elvira', gender: 'female' },
+  { id: 'vi-VN-HoaiMyNeural',   label: '베트남어 여성 — HoaiMy', gender: 'female' },
 ];
 
-const TTS_SAMPLE_RATE = 24000;
-
-// AudioContext 싱글톤
-let _audioCtx: AudioContext | null = null;
-function getAudioCtx(): AudioContext {
-  if (!_audioCtx || _audioCtx.state === 'closed') {
-    _audioCtx = new AudioContext({ sampleRate: TTS_SAMPLE_RATE });
-  }
-  return _audioCtx;
-}
-
-// 언어 코드 → Gemini TTS 기본 보이스 (사용자 선택 없을 때)
-function defaultVoiceForLang(langCode: string): string {
+// 언어 코드 → Edge TTS 기본 보이스
+export function defaultEdgeVoiceForLang(langCode: string): string {
   const map: Record<string, string> = {
-    'ko-KR': 'Kore',   'ja-JP': 'Kore',
-    'zh-CN': 'Charon', 'zh-TW': 'Charon',
-    'en-US': 'Aoede',  'en-GB': 'Aoede',
-    'es-ES': 'Fenrir', 'fr-FR': 'Zephyr',
-    'de-DE': 'Puck',   'vi-VN': 'Aoede',
+    'ko-KR': 'ko-KR-SunHiNeural',
+    'ja-JP': 'ja-JP-NanamiNeural',
+    'zh-CN': 'zh-CN-XiaoxiaoNeural',
+    'zh-TW': 'zh-TW-HsiaoChenNeural',
+    'en-US': 'en-US-JennyNeural',
+    'en-GB': 'en-GB-SoniaNeural',
+    'es-ES': 'es-ES-ElviraNeural',
+    'fr-FR': 'fr-FR-DeniseNeural',
+    'de-DE': 'de-DE-KatjaNeural',
+    'vi-VN': 'vi-VN-HoaiMyNeural',
   };
-  return map[langCode] ?? 'Aoede';
+  return map[langCode] ?? 'en-US-JennyNeural';
 }
 
-// Raw PCM Int16 (little-endian) → AudioBuffer
-function pcmInt16ToAudioBuffer(base64: string): AudioBuffer {
-  const binaryStr = atob(base64);
-  const bytes = new Uint8Array(binaryStr.length);
-  for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-  const int16 = new Int16Array(bytes.buffer);
-  const float32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
-  const ctx = getAudioCtx();
-  const audioBuffer = ctx.createBuffer(1, float32.length, TTS_SAMPLE_RATE);
-  audioBuffer.copyToChannel(float32, 0);
-  return audioBuffer;
+// ── Edge TTS WebSocket ────────────────────────
+// Microsoft Edge Read Aloud 공개 엔드포인트 사용
+// Electron Chromium 렌더러에서 브라우저 네이티브 WebSocket으로 연결
+const EDGE_TTS_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
+
+function uuid(): string {
+  return 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/x/g, () =>
+    Math.floor(Math.random() * 16).toString(16)
+  );
 }
 
-// 단일 TTS 요청 (재시도 없음)
-async function callTTSApi(text: string, lang: string, key: string, voiceName?: string): Promise<AudioBuffer | null> {
-  const url = `https://generativelanguage.googleapis.com/v1alpha/models/gemini-2.5-flash-preview-tts:generateContent?key=${key}`;
-  const body = {
-    contents: [{ role: 'user', parts: [{ text }] }],
-    generationConfig: {
-      responseModalities: ['AUDIO'],
-      speechConfig: {
-        voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName ?? defaultVoiceForLang(lang) } },
-      },
-    },
-  };
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`${res.status}:${errText}`);
-  }
-
-  const json = await res.json();
-  const parts: { inlineData?: { data: string; mimeType: string } }[] =
-    json?.candidates?.[0]?.content?.parts ?? [];
-
-  for (const part of parts) {
-    if (part?.inlineData?.data) {
-      const { data, mimeType = 'audio/pcm' } = part.inlineData;
-      if (mimeType.toLowerCase().includes('pcm') || mimeType.toLowerCase().includes('l16')) {
-        return pcmInt16ToAudioBuffer(data);
-      }
-      const bin = atob(data);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      return await getAudioCtx().decodeAudioData(bytes.buffer.slice(0));
-    }
-  }
-  return null;
-}
-
-// ── Gemini TTS → AudioBuffer (최대 2회 시도) ──────────────
-export async function synthesizeToAudioBuffer(
+// 텍스트 → MP3 ArrayBuffer (VB-Cable/이어폰 라우팅용)
+// AudioContext는 호출 측(AudioRouter)에서 디코딩 — ctx 불일치 방지
+export async function synthesizeEdgeTTS(
   text: string,
-  options: TTSOptions,
-  apiKey?: string
-): Promise<AudioBuffer | null> {
-  const key = apiKey ?? (window as Window & { __geminiApiKey?: string }).__geminiApiKey;
-  if (!key || !text.trim()) return null;
+  voice: string,
+  rate = 1.0
+): Promise<ArrayBuffer | null> {
+  if (!text.trim()) return null;
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const buf = await callTTSApi(text, options.lang, key, options.voice);
-      return buf;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (attempt === 2) {
-        console.warn('[TTS] 실패 (2회):', msg);
-        return null;
+  return new Promise<ArrayBuffer | null>((resolve) => {
+    const connId = uuid();
+    const ws = new WebSocket(
+      `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1` +
+      `?TrustedClientToken=${EDGE_TTS_TOKEN}&ConnectionId=${connId}`
+    );
+    ws.binaryType = 'arraybuffer';
+
+    const chunks: ArrayBuffer[] = [];
+    let settled = false;
+
+    const done = (result: ArrayBuffer | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      ws.close();
+      done(null);
+    }, 15000);
+
+    ws.onopen = () => {
+      const ts = new Date().toISOString();
+
+      // 1. 음성 설정 전송
+      ws.send(
+        `X-Timestamp:${ts}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n` +
+        `{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}`
+      );
+
+      // 2. SSML 합성 요청
+      const rateStr = rate >= 1
+        ? `+${Math.round((rate - 1) * 100)}%`
+        : `${Math.round((rate - 1) * 100)}%`;
+      const lang = voice.slice(0, 5); // 'ko-KR'
+      const escaped = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      const ssml =
+        `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='${lang}'>` +
+        `<voice name='${voice}'><prosody rate='${rateStr}'>${escaped}</prosody></voice></speak>`;
+
+      ws.send(
+        `X-RequestId:${connId}\r\nContent-Type:application/ssml+xml\r\n` +
+        `X-Timestamp:${ts}\r\nPath:ssml\r\n\r\n${ssml}`
+      );
+    };
+
+    ws.onmessage = (event) => {
+      if (typeof event.data === 'string') {
+        // 텍스트 메시지: turn.end 수신 시 오디오 청크 병합 후 반환
+        if (event.data.includes('Path:turn.end')) {
+          ws.close();
+          const total = chunks.reduce((s, c) => s + c.byteLength, 0);
+          const merged = new Uint8Array(total);
+          let offset = 0;
+          for (const chunk of chunks) {
+            merged.set(new Uint8Array(chunk), offset);
+            offset += chunk.byteLength;
+          }
+          done(merged.buffer);
+        }
+      } else if (event.data instanceof ArrayBuffer) {
+        // 바이너리 메시지: [2바이트 헤더 길이][헤더][MP3 오디오 데이터]
+        const headerLen = new DataView(event.data).getUint16(0);
+        const audioData = event.data.slice(2 + headerLen);
+        if (audioData.byteLength > 0) chunks.push(audioData);
       }
-      await new Promise((r) => setTimeout(r, 800));
-    }
-  }
-  return null;
+    };
+
+    ws.onerror = () => done(null);
+    ws.onclose = () => { /* done()은 이미 호출됨 */ };
+  });
 }
 
-// ── TTS 중단 ──────────────────────────────────
+// ── TTS 중단 (브라우저 TTS 폴백용) ────────────
 export function stopTTS(): void {
   if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
 }
 
-// ── 브라우저 TTS 보이스 성별 매핑 ──────────────
-// 프리셋 gender 값을 기반으로 OS 음성 목록에서 적합한 보이스를 선택
-function findBrowserVoiceByGender(langCode: string, gender: 'female' | 'male'): SpeechSynthesisVoice | undefined {
-  const voices = window.speechSynthesis.getVoices();
-  const baseLang = langCode.split('-')[0].toLowerCase();
-  const langVoices = voices.filter((v) => v.lang.toLowerCase().startsWith(baseLang));
-  if (langVoices.length === 0) return undefined;
-
-  // OS별 공통 여성/남성 음성 이름 힌트
-  const femaleHints = ['female', 'woman', 'zira', 'eva', 'aria', 'jenny', 'sonia', 'samantha', 'victoria', 'kyoko', 'yuna'];
-  const maleHints   = ['male', 'man', 'david', 'mark', 'george', 'ryan', 'alex', 'daniel', 'fred', 'otoya'];
-  const hints = gender === 'female' ? femaleHints : maleHints;
-
-  return (
-    langVoices.find((v) => hints.some((h) => v.name.toLowerCase().includes(h))) ??
-    langVoices[gender === 'female' ? 0 : Math.min(1, langVoices.length - 1)]
-  );
-}
-
-// ── 브라우저 내장 TTS (Gemini 할당량 초과 시 폴백) ──────────
-// voiceId: TTS_VOICE_PRESETS 의 id (Gemini voice name) — gender로 브라우저 음성 선택
-// rate: 말하기 속도 (0.5~2.0, 기본 1.0)
-export function speakBrowserTTS(text: string, langCode: string, voiceId?: string, rate = 1.0): void {
+// ── 브라우저 내장 TTS (Edge TTS 실패 시 폴백) ──
+export function speakBrowserTTS(text: string, langCode: string, rate = 1.0): void {
   if (!text.trim() || typeof window === 'undefined') return;
   const synth = window.speechSynthesis;
   if (!synth) return;
@@ -168,14 +157,164 @@ export function speakBrowserTTS(text: string, langCode: string, voiceId?: string
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = langCode;
   utterance.rate = rate;
+  synth.speak(utterance);
+}
 
-  if (voiceId) {
-    const preset = TTS_VOICE_PRESETS.find((p) => p.id === voiceId);
-    if (preset) {
-      const voice = findBrowserVoiceByGender(langCode, preset.gender);
-      if (voice) utterance.voice = voice;
+// ─────────────────────────────────────────────
+// TTS 엔진 타입
+// ─────────────────────────────────────────────
+export type TTSEngine = 'edge' | 'elevenlabs' | 'gemini';
+
+// ── ElevenLabs TTS ────────────────────────────
+// eleven_multilingual_v2 모델 — 다국어 자동 지원, API 키 필요
+
+// GET /v1/voices 응답 타입 (필요한 필드만)
+export type ElevenLabsVoice = {
+  voice_id: string;
+  name: string;
+  category: string; // 'premade' | 'cloned' | 'generated' | ...
+  preview_url?: string; // 미리 듣기 MP3 URL (ElevenLabs CDN)
+  labels: Partial<{
+    accent: string;
+    description: string;
+    age: string;
+    gender: string;
+    use_case: string;
+  }>;
+};
+
+// voice 메타데이터 → UI 라벨 조합 (최대 3개 태그)
+export function buildElevenLabsLabel(v: ElevenLabsVoice): string {
+  const tags = [v.labels.accent, v.labels.use_case, v.labels.description]
+    .filter(Boolean)
+    .map((s) => s!.charAt(0).toUpperCase() + s!.slice(1))
+    .join(' · ');
+  return tags ? `${v.name} — ${tags}` : v.name;
+}
+
+// GET https://api.elevenlabs.io/v1/voices
+// API 키가 틀렸거나 네트워크 오류 시 throw — 호출 측에서 catch 후 폴백
+export async function fetchElevenLabsVoices(apiKey: string): Promise<ElevenLabsVoice[]> {
+  const res = await fetch('https://api.elevenlabs.io/v1/voices', {
+    headers: { 'xi-api-key': apiKey },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`ElevenLabs 인증 실패 (${res.status}): ${body.slice(0, 80)}`);
+  }
+  const data = await res.json();
+  // voices 배열을 name 기준으로 오름차순 정렬
+  return (data.voices as ElevenLabsVoice[]).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// 하드코딩 폴백 프리셋 — API 패치 실패 시 렌더링
+export const ELEVENLABS_VOICE_PRESETS: { id: string; label: string }[] = [
+  { id: '21m00Tcm4TlvDq8ikWAM', label: 'Rachel — American · Narration · Calm' },
+  { id: 'pNInz6obpgDQGcFmaJgB', label: 'Adam — American · Narration · Deep'   },
+  { id: 'EXAVITQu4vr4xnSDxMaL', label: 'Bella — American · Narration · Soft'  },
+  { id: 'ErXwobaYiN019PkySvjV', label: 'Antoni — American · Narration · Well-rounded' },
+  { id: 'VR6AewLTigWG4xSOukaG', label: 'Arnold — American · Narration · Crisp' },
+  { id: 'ThT5KcBeYPX3keUQqHPh', label: 'Dorothy — British · Narration · Pleasant' },
+];
+
+export async function synthesizeElevenLabsTTS(
+  text: string,
+  voiceId: string,
+  apiKey: string
+): Promise<ArrayBuffer | null> {
+  if (!text.trim()) return null;
+
+  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'xi-api-key': apiKey,
+      'Accept': 'audio/mpeg',
+    },
+    body: JSON.stringify({
+      text,
+      model_id: 'eleven_multilingual_v2',
+      voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`ElevenLabs ${res.status}: ${body.slice(0, 120)}`);
+  }
+  return res.arrayBuffer();
+}
+
+// ── Gemini TTS ────────────────────────────────
+// gemini-2.5-flash-preview-tts — API 키 필요, 다국어 지원
+// PCM LINEAR16(24kHz) 반환 → WAV 컨테이너로 래핑하여 AudioContext에서 디코딩
+export const GEMINI_TTS_VOICE_PRESETS = [
+  { id: 'Aoede',  label: 'Aoede — 여성, 밝음'  },
+  { id: 'Puck',   label: 'Puck — 남성, 활기참' },
+  { id: 'Charon', label: 'Charon — 남성, 중후함' },
+  { id: 'Kore',   label: 'Kore — 여성, 차분'   },
+  { id: 'Fenrir', label: 'Fenrir — 남성, 강렬함' },
+  { id: 'Leda',   label: 'Leda — 여성, 부드러움' },
+  { id: 'Orus',   label: 'Orus — 남성, 안정적'  },
+  { id: 'Zephyr', label: 'Zephyr — 중성, 자연스러움' },
+];
+
+// PCM LINEAR16 raw bytes → WAV file ArrayBuffer
+function pcmToWav(pcm: ArrayBuffer, sampleRate = 24000, channels = 1, bitsPerSample = 16): ArrayBuffer {
+  const data = new Uint8Array(pcm);
+  const wav = new ArrayBuffer(44 + data.byteLength);
+  const v = new DataView(wav);
+  const str = (off: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+  str(0,  'RIFF');
+  v.setUint32(4,  36 + data.byteLength, true);
+  str(8,  'WAVE');
+  str(12, 'fmt ');
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1,  true);                                         // PCM
+  v.setUint16(22, channels, true);
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * channels * bitsPerSample / 8, true);  // ByteRate
+  v.setUint16(32, channels * bitsPerSample / 8, true);               // BlockAlign
+  v.setUint16(34, bitsPerSample, true);
+  str(36, 'data');
+  v.setUint32(40, data.byteLength, true);
+  new Uint8Array(wav, 44).set(data);
+  return wav;
+}
+
+export async function synthesizeGeminiTTS(
+  text: string,
+  voice: string,
+  apiKey: string
+): Promise<ArrayBuffer | null> {
+  if (!text.trim()) return null;
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1alpha/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text }] }],
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } },
+        },
+      }),
     }
+  );
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Gemini TTS ${res.status}: ${body.slice(0, 120)}`);
   }
 
-  synth.speak(utterance);
+  const json = await res.json();
+  const b64: string | undefined = json?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+  if (!b64) throw new Error('Gemini TTS: 오디오 데이터 없음');
+
+  const binary = atob(b64);
+  const pcm = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) pcm[i] = binary.charCodeAt(i);
+  return pcmToWav(pcm.buffer);
 }

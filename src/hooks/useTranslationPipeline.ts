@@ -3,7 +3,11 @@
 import { useRef, useCallback, useState, useEffect } from 'react';
 import { GeminiSTTManager, type STTLanguage } from '@/lib/stt';
 import { translateTextStream, langCodeToName } from '@/lib/gemini';
-import { synthesizeToAudioBuffer, stopTTS, speakBrowserTTS } from '@/lib/tts';
+import {
+  synthesizeEdgeTTS, defaultEdgeVoiceForLang, stopTTS, speakBrowserTTS,
+  synthesizeElevenLabsTTS, synthesizeGeminiTTS,
+  type TTSEngine,
+} from '@/lib/tts';
 import { useAudioRouter } from './useAudioRouter';
 
 // ─────────────────────────────────────────────
@@ -36,8 +40,10 @@ export type PipelineConfig = {
   micDeviceId?: string;
   virtualMicDeviceId?: string;
   earphoneDeviceId?: string;
-  ttsVoice?: string; // TTS_VOICE_PRESETS id (Gemini voice name) — 미지정 시 언어 기본값
-  ttsRate?: number;  // 말하기 속도 (0.5~2.0, 기본 1.0)
+  ttsVoice?: string;        // 선택된 엔진의 voice ID
+  ttsRate?: number;         // 말하기 속도 (0.5~2.0, 기본 1.0) — Edge TTS 전용
+  ttsEngine?: TTSEngine;    // 'edge' | 'elevenlabs' | 'gemini' (기본: 'edge')
+  elevenLabsApiKey?: string; // ElevenLabs 전용 API 키
 };
 
 type TranslationJob = { source: 'mic' | 'sys'; text: string; config: PipelineConfig };
@@ -51,6 +57,7 @@ export function useTranslationPipeline() {
   const [interimMic, setInterimMic] = useState('');
   const [interimSys, setInterimSys] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [ttsWarning, setTtsWarning] = useState<string | null>(null);
 
   const queueRef = useRef<TranslationJob[]>([]);
   const isProcessingRef = useRef(false);
@@ -98,29 +105,73 @@ export function useTranslationPipeline() {
 
       if (!accumulated.trim()) return;
 
-      // TTS 합성 + 라우팅
-      // [임시] 브라우저 내장 TTS (Gemini TTS 할당량 리셋 전까지)
-      // 할당량 리셋 후: 아래 speakBrowserTTS 라인을 주석 처리하고 그 아래 블록 주석 해제
-      // 브라우저 TTS는 시스템 오디오로 재캡처될 수 있으므로 재생 후 sys 차단
-      const estimatedTtsDurationMs = Math.max(accumulated.length * 80, 3000);
-      sysMuteUntilRef.current = Date.now() + estimatedTtsDurationMs + 2000;
-      speakBrowserTTS(accumulated, ttsLang, config.ttsVoice, config.ttsRate ?? 1.0);
-      /* [Gemini TTS 복구 후 사용]
-      const audioBuffer = await synthesizeToAudioBuffer(
-        accumulated,
-        { lang: ttsLang, rate: config.ttsRate ?? 1.0, voice: config.ttsVoice },
-        config.apiKey,
-      );
-      if (audioBuffer) {
-        if (source === 'mic') {
-          await audioRouter.routeTTSToVirtualMic(audioBuffer); // VB-Cable → Discord
+      // ── 통합 TTS 합성 (선택 엔진 → Edge TTS 폴백 → 브라우저 TTS 최종 폴백) ──
+      const engine  = config.ttsEngine ?? 'edge';
+      const rate    = config.ttsRate ?? 1.0;
+      const edgeFallbackVoice = defaultEdgeVoiceForLang(ttsLang);
+
+      let audioBuffer: ArrayBuffer | null = null;
+      let usedBrowserFallback = false;
+
+      // 1차: 선택된 엔진 시도
+      try {
+        if (engine === 'elevenlabs') {
+          if (!config.elevenLabsApiKey) throw new Error('ElevenLabs API 키 없음');
+          audioBuffer = await synthesizeElevenLabsTTS(
+            accumulated,
+            config.ttsVoice ?? '21m00Tcm4TlvDq8ikWAM',
+            config.elevenLabsApiKey
+          );
+        } else if (engine === 'gemini') {
+          audioBuffer = await synthesizeGeminiTTS(
+            accumulated,
+            config.ttsVoice ?? 'Aoede',
+            config.apiKey
+          );
         } else {
-          await audioRouter.routeTTSToEarphone(audioBuffer);   // 이어폰
+          audioBuffer = await synthesizeEdgeTTS(
+            accumulated,
+            config.ttsVoice ?? edgeFallbackVoice,
+            rate
+          );
+        }
+      } catch (primaryErr) {
+        const reason = (primaryErr as Error).message?.slice(0, 80) ?? String(primaryErr);
+        const warn = `${engine === 'elevenlabs' ? 'ElevenLabs' : 'Gemini'} TTS 실패 → Edge TTS로 자동 전환 (${reason})`;
+        console.warn('[TTS Fallback]', warn);
+        setTtsWarning(warn);
+
+        // 2차: Edge TTS 폴백
+        try {
+          audioBuffer = await synthesizeEdgeTTS(accumulated, edgeFallbackVoice, rate);
+        } catch (edgeErr) {
+          console.warn('[TTS Fallback] Edge TTS도 실패 → 브라우저 TTS 최종 폴백:', edgeErr);
+          audioBuffer = null;
+        }
+      }
+
+      if (audioBuffer) {
+        // MP3/WAV 크기로 재생 시간 추정 (48kbps → ~6KB/s) + 5초 여유
+        const estimatedDurationMs = (audioBuffer.byteLength / 6000) * 1000 + 5000;
+        sysMuteUntilRef.current = Date.now() + estimatedDurationMs;
+
+        if (source === 'mic') {
+          // 내 번역음 → VB-Cable → Discord 상대방 마이크로 전달
+          await audioRouter.routeMP3ToVirtualMic(audioBuffer);
+          // TTS 완료 후 추가 5초 뮤트 — STT 에코 차단
+          sysMuteUntilRef.current = Date.now() + 5000;
+        } else {
+          // 상대방 번역음 → 이어폰으로 출력 (setSinkId 적용)
+          await audioRouter.playBlobToEarphone(new Blob([audioBuffer], { type: 'audio/mp3' }));
         }
       } else {
-        speakBrowserTTS(accumulated, ttsLang, config.ttsVoice, config.ttsRate ?? 1.0);
+        // 3차(최종): 브라우저 내장 TTS — VB-Cable 라우팅 불가, 이어폰만 출력
+        usedBrowserFallback = true;
+        const estimatedTtsDurationMs = Math.max(accumulated.length * 80, 3000);
+        sysMuteUntilRef.current = Date.now() + estimatedTtsDurationMs + 6000;
+        speakBrowserTTS(accumulated, ttsLang, rate);
       }
-      */
+      void usedBrowserFallback; // 추후 UI 상태 표시용
 
       if (source === 'mic') setInterimMic('');
       else setInterimSys('');
@@ -234,6 +285,13 @@ export function useTranslationPipeline() {
 
   const clearTranscripts = useCallback(() => setTranscripts([]), []);
 
+  // ttsWarning 자동 소거 — 4초 후 토스트 사라짐
+  useEffect(() => {
+    if (!ttsWarning) return;
+    const t = setTimeout(() => setTtsWarning(null), 4000);
+    return () => clearTimeout(t);
+  }, [ttsWarning]);
+
   // 컴포넌트 언마운트 시에만 실행 — audioRouter를 dep에 넣으면 매 렌더마다
   // cleanup이 실행돼서 STT가 즉시 중단되는 버그 발생 (audioRouter는 매 렌더 새 객체)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -245,7 +303,7 @@ export function useTranslationPipeline() {
   }, []);
 
   return {
-    state, transcripts, interimMic, interimSys, error,
+    state, transcripts, interimMic, interimSys, error, ttsWarning,
     start, stop, clearTranscripts,
     devices: audioRouter.devices,
     refreshDevices: audioRouter.refreshDevices,
