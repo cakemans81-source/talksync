@@ -1,3 +1,68 @@
+import type { Dict } from '@/app/[locale]/dictionaries';
+
+// ── 다국어 dict를 받아 렌더링하는 버전 (i18n 랜딩 페이지용) ──
+export function LocalizedTrustSection({ dict }: { dict: Dict['trust'] }) {
+  return (
+    <section className="py-32 px-8 max-w-[1440px] mx-auto">
+      <div className="mb-20 flex flex-col md:flex-row md:justify-between md:items-end gap-6">
+        <div>
+          <p className="font-label text-xs tracking-widest text-primary uppercase mb-4">
+            {dict.eyebrow}
+          </p>
+          <h2 className="font-headline text-4xl font-extralight tracking-tight text-on-background">
+            {dict.headline}
+          </h2>
+        </div>
+        <p className="font-body text-sm text-outline leading-relaxed max-w-sm md:text-right">
+          {dict.subDesc}
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-0 border border-[#E5E5E5] mb-12">
+        {dict.cards.map((card, i) => (
+          <div
+            key={i}
+            className="p-10 border-b md:border-b-0 border-r-0 md:border-r border-[#E5E5E5] last:border-r-0 last:border-b-0 flex flex-col gap-5 group hover:bg-[#fafafa] transition-colors duration-300"
+          >
+            <div className="flex items-start justify-between">
+              <span className="material-symbols-outlined text-primary text-3xl">{card.icon}</span>
+              <span className="font-label text-[9px] tracking-widest uppercase bg-primary/10 text-primary px-2 py-1 leading-none">
+                {card.badge}
+              </span>
+            </div>
+            <div className="flex flex-col gap-3 flex-1">
+              <h3 className="font-headline text-lg font-normal text-on-background">{card.title}</h3>
+              <p className="font-body text-sm text-outline leading-relaxed">{card.desc}</p>
+            </div>
+            <div className="flex items-center gap-2 pt-4 border-t border-[#E5E5E5]">
+              <div className="w-[1px] h-3 bg-primary opacity-60" />
+              <span className="font-label text-[10px] tracking-wider text-outline uppercase">{card.detail}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="w-full bg-zinc-950 px-10 py-8 flex flex-col md:flex-row items-center justify-between gap-6 relative overflow-hidden">
+        <div className="absolute inset-0 opacity-10 pointer-events-none">
+          <div className="absolute top-1/2 left-1/4 -translate-y-1/2 w-[400px] h-[200px] bg-primary blur-[80px] rounded-full" />
+        </div>
+        <div className="relative z-10 flex flex-col gap-2">
+          <p className="font-label text-[10px] tracking-[0.4em] uppercase text-primary">{dict.bannerLabel}</p>
+          <p className="font-headline text-xl font-light text-surface tracking-tight">{dict.bannerSlogan}</p>
+        </div>
+        <div className="relative z-10 flex flex-wrap items-center gap-3">
+          {dict.tags.map((tag) => (
+            <span key={tag} className="font-label text-[10px] uppercase tracking-wider border border-white/20 text-white/60 px-3 py-1.5 hover:border-primary hover:text-primary transition-colors duration-200">
+              {tag}
+            </span>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ── 한국어 하드코딩 버전 (기존 랜딩 page.tsx / Electron용) ──
 const TRUST_CARDS = [
   {
     icon: 'key',

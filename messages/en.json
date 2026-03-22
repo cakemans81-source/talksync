@@ -1,0 +1,53 @@
+{
+  "nav": { "download": "Download for Windows" },
+  "hero": {
+    "headline": "Converse Beyond Language",
+    "subtitle": "Real-time AI Voice Translation",
+    "cta": "Download for Windows (Free)"
+  },
+  "features": [
+    { "icon": "translate", "title": "Real-time Translation", "desc": "The moment you speak, it's delivered in the other person's language for seamless conversation." },
+    { "icon": "public", "title": "40+ Languages", "desc": "Support for major world languages in one app, enabling truly global communication." },
+    { "icon": "settings_voice", "title": "AI Voice Synthesis", "desc": "Generates translated speech while preserving your voice tone and intonation." },
+    { "icon": "verified_user", "title": "Security", "desc": "End-to-end encryption keeps all your conversations completely safe." }
+  ],
+  "process": {
+    "label": "PROCESS",
+    "steps": [
+      { "num": "01", "icon": "mic_none", "title": "Voice Input", "desc": "Speak naturally in your language. AI captures your voice in real time." },
+      { "num": "02", "icon": "auto_awesome", "title": "AI Analysis & Translation", "desc": "Our advanced engine understands context and delivers the optimal translation." },
+      { "num": "03", "icon": "volume_up", "title": "Instant Output", "desc": "The translated sentence flows out vividly in the other person's language." }
+    ]
+  },
+  "free": {
+    "eyebrow": "100% Free, Always",
+    "headline": "TalkSync is completely free",
+    "desc": "From account creation to real-time translation, no payment required.\nWe operate through advertising so all features remain free.",
+    "items": [
+      { "icon": "all_inclusive", "title": "Unlimited Use", "desc": "Use real-time translation anytime without time limits." },
+      { "icon": "credit_card_off", "title": "No Card Required", "desc": "Get started with just your email — no credit card or payment info needed." },
+      { "icon": "lock_open", "title": "All Features Included", "desc": "Equal access to all languages and features, no premium tiers." }
+    ]
+  },
+  "trust": {
+    "eyebrow": "Trust & Security",
+    "headline": "Your data. We don't know it.",
+    "subDesc": "TalkSync treats privacy as a core principle from the ground up. No user data is ever recorded on our servers.",
+    "cards": [
+      { "icon": "key", "badge": "BYOK", "title": "Perfect Key Isolation", "desc": "Your API key is stored only in your device's local storage. It is architecturally impossible for it to be sent to or collected by TalkSync servers.", "detail": "localStorage → AES-256 encryption" },
+      { "icon": "security", "badge": "ENTERPRISE", "title": "Enterprise-grade App Security", "desc": "ASAR archive packing and full source code obfuscation prevent external tampering. The deployed binary contains no original source.", "detail": "asar packing + code obfuscation" },
+      { "icon": "noise_aware", "badge": "ZERO RETENTION", "title": "Transparent Data Handling", "desc": "Captured audio data is discarded from memory immediately after translation. No voice recording, unauthorized collection, or third-party forwarding.", "detail": "Memory released immediately after translation" }
+    ],
+    "bannerLabel": "Zero-Knowledge Architecture",
+    "bannerSlogan": "The server cannot know what you said.",
+    "tags": ["E2E Encrypted", "BYOK", "No Server Logs", "ASAR Packed", "Local-only Storage"]
+  },
+  "interstitial": {
+    "headline": "GLOBAL DISCOURSE\nARCHIVED.",
+    "sub": "Beyond the Language Barrier"
+  },
+  "footer": {
+    "tagline": "© 2024 TALKSYNC. ARCHIVING GLOBAL DISCOURSE.",
+    "links": ["Privacy Policy", "Terms of Service", "Instagram", "LinkedIn"]
+  }
+}

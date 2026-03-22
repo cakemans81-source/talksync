@@ -1,0 +1,53 @@
+{
+  "nav": { "download": "下载 Windows 版" },
+  "hero": {
+    "headline": "跨越语言，自由对话",
+    "subtitle": "Real-time AI Voice Translation",
+    "cta": "下载 Windows 版（免费）"
+  },
+  "features": [
+    { "icon": "translate", "title": "实时翻译", "desc": "您开口说话的瞬间，即以对方语言传达，实现无缝对话。" },
+    { "icon": "public", "title": "40+ 种语言", "desc": "一个应用支持全球主要语言，助力全球沟通。" },
+    { "icon": "settings_voice", "title": "AI 语音合成", "desc": "在保留您声音音调和语调的同时生成翻译语音。" },
+    { "icon": "verified_user", "title": "安全保障", "desc": "端对端加密技术，全面保护您的所有对话内容。" }
+  ],
+  "process": {
+    "label": "PROCESS",
+    "steps": [
+      { "num": "01", "icon": "mic_none", "title": "语音输入", "desc": "用您的语言自然说话，AI 实时捕捉声音。" },
+      { "num": "02", "icon": "auto_awesome", "title": "AI 分析与翻译", "desc": "高级引擎理解上下文，提供最优翻译。" },
+      { "num": "03", "icon": "volume_up", "title": "即时输出", "desc": "翻译后的语句以对方语言生动流畅地输出。" }
+    ]
+  },
+  "free": {
+    "eyebrow": "100% Free, Always",
+    "headline": "TalkSync 完全免费",
+    "desc": "从创建账户到实时翻译，无需任何付款。\n我们通过广告维持运营，所有功能均可免费使用。",
+    "items": [
+      { "icon": "all_inclusive", "title": "无限使用", "desc": "随时随地无时间限制地使用实时翻译。" },
+      { "icon": "credit_card_off", "title": "无需绑卡", "desc": "仅需电子邮件即可开始，无需信用卡或支付信息。" },
+      { "icon": "lock_open", "title": "全功能开放", "desc": "所有语言和功能平等提供，无高级版区分。" }
+    ]
+  },
+  "trust": {
+    "eyebrow": "Trust & Security",
+    "headline": "您的数据，我们不知晓。",
+    "subDesc": "TalkSync 从设计之初就将隐私作为核心原则。任何用户数据均不会记录在我们的服务器上。",
+    "cards": [
+      { "icon": "key", "badge": "BYOK", "title": "完美密钥隔离", "desc": "您的 API 密钥仅存储在您设备的本地存储中。从架构上讲，不可能传输到 TalkSync 服务器或被收集。", "detail": "localStorage → AES-256 加密" },
+      { "icon": "security", "badge": "ENTERPRISE", "title": "企业级应用安全", "desc": "ASAR 归档打包和全面的源代码混淆可防止外部篡改。部署二进制文件中不包含原始源代码。", "detail": "asar 打包 + 代码混淆" },
+      { "icon": "noise_aware", "badge": "ZERO RETENTION", "title": "透明数据处理", "desc": "捕获的音频数据在翻译后立即从内存中释放。不存在录音、未经授权的收集或第三方转发。", "detail": "翻译后立即释放内存" }
+    ],
+    "bannerLabel": "Zero-Knowledge Architecture",
+    "bannerSlogan": "服务器无法知道您说了什么。",
+    "tags": ["E2E 加密", "BYOK", "No Server Logs", "ASAR 打包", "仅本地存储"]
+  },
+  "interstitial": {
+    "headline": "GLOBAL DISCOURSE\nARCHIVED.",
+    "sub": "Beyond the Language Barrier"
+  },
+  "footer": {
+    "tagline": "© 2024 TALKSYNC. ARCHIVING GLOBAL DISCOURSE.",
+    "links": ["Privacy Policy", "Terms of Service", "Instagram", "LinkedIn"]
+  }
+}
