@@ -312,6 +312,11 @@ export function useTranslationPipeline() {
     setEarphoneDevice: audioRouter.setEarphoneDevice,
     getMicLevel: audioRouter.getMicLevel,
     getSysLevel: audioRouter.getSysLevel,
+    // V2 Gemini Live 파이프라인 연동용 — 별도 오디오 캡처 및 Silero VAD 연결
+    captureMic: audioRouter.captureMic,
+    captureSystemAudio: audioRouter.captureSystemAudio,
+    startVADWeb: audioRouter.startVADWeb,
+    playBlobToEarphone: audioRouter.playBlobToEarphone,
     get isMicActive() { return audioRouter.isMicActive; },
     get isSysActive() { return audioRouter.isSysActive; },
   };

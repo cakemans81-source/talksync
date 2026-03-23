@@ -9,8 +9,9 @@ const PROTOCOL = 'talksync';
 
 // app:// 커스텀 프로토콜 — file:// 대신 사용하여 서브 페이지에서도 에셋 경로가 항상 out/ 루트 기준으로 해석됨
 // (app.whenReady() 호출 전에 등록해야 함)
+// corsEnabled: true → Module Worker (ort-wasm-simd-threaded.mjs) 로드 허용
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'app', privileges: { secure: true, standard: true, supportFetchAPI: true } },
+  { scheme: 'app', privileges: { secure: true, standard: true, supportFetchAPI: true, corsEnabled: true } },
 ]);
 const isDev = !app.isPackaged;
 
@@ -79,11 +80,26 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   // app:// 요청을 out/ 폴더의 정적 파일로 라우팅
+  // COOP/COEP 헤더 추가 → crossOriginIsolated = true → SharedArrayBuffer 활성화
+  //   SharedArrayBuffer는 onnxruntime-web(threaded WASM)이 필수로 요구
+  //   COEP 'credentialless' = require-corp보다 완화 (서드파티 리소스 쿠키 없이 허용)
   const outDir = path.join(__dirname, '../out');
-  protocol.handle('app', (request) => {
+  protocol.handle('app', async (request) => {
     const { pathname } = new URL(request.url);
     const filePath = path.join(outDir, pathname);
-    return net.fetch(pathToFileURL(filePath).toString());
+    const response = await net.fetch(pathToFileURL(filePath).toString());
+
+    const headers = new Headers(response.headers);
+    // Cross-Origin Isolation — SharedArrayBuffer + Module Worker 활성화
+    headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+    headers.set('Cross-Origin-Embedder-Policy', 'credentialless');
+    headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
   });
 
   createWindow();
@@ -114,7 +130,11 @@ app.on('activate', () => {
 // 형태로 시스템 오디오를 바로 캡처할 수 있도록 sourceId를 전달
 ipcMain.handle('get-system-audio-source-id', async (): Promise<string | null> => {
   const sources = await desktopCapturer.getSources({ types: ['screen'] });
-  return sources[0]?.id ?? null;
+  // 'screen:' prefix를 가진 소스를 우선 선택 (window 소스 제외)
+  const screenSource = sources.find((s) => s.id.startsWith('screen:')) ?? sources[0];
+  console.log('[main] system audio sources:', sources.map((s) => s.id));
+  console.log('[main] selected source:', screenSource?.id);
+  return screenSource?.id ?? null;
 });
 
 // ── 외부 브라우저 열기 (Google OAuth 팝업) ───────────────────────

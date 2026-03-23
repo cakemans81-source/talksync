@@ -1,6 +1,7 @@
 'use client';
 
-import { useRef, useCallback, useEffect, useState } from 'react';
+import { useRef, useCallback, useEffect, useState, type MutableRefObject } from 'react';
+import { attachVAD, type VADCallbacks, type VADOptions } from '@/lib/systemAudioCapture';
 
 // ─────────────────────────────────────────────
 // 가상 오디오 케이블 설치 & 브라우저 연동 가이드
@@ -277,33 +278,39 @@ class AudioRouter {
   async captureSystemAudio(): Promise<void> {
     if (this.ctx.state === 'suspended') await this.ctx.resume();
 
-    // ── Electron 경로: desktopCapturer로 팝업 없이 즉시 캡처 ────
+    // ── Electron 경로: getUserMedia + chromeMediaSource 정석 ──────────────
+    // Chromium 스펙:
+    //   audio mandatory에는 chromeMediaSourceId를 넣지 않음 (넣으면 silent stream)
+    //   video mandatory에만 sourceId를 바인딩해야 loopback audio가 올바르게 캡처됨
     const win = window as Window & { electronAPI?: { getSystemAudioSourceId: () => Promise<string | null> } };
     if (win.electronAPI?.getSystemAudioSourceId) {
       const sourceId = await win.electronAPI.getSystemAudioSourceId();
       if (!sourceId) throw new Error('시스템 오디오 소스를 찾을 수 없어요');
 
-      // Chromium은 desktop 캡처 시 video도 함께 요청해야 audio가 동작함
-      const desktopConstraints = { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId };
-      const getUserMediaWithTimeout = (constraints: MediaStreamConstraints, ms: number) =>
-        Promise.race([
-          navigator.mediaDevices.getUserMedia(constraints),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('시스템 오디오 캡처 타임아웃 (5초)')), ms)
-          ),
-        ]);
-      const stream = await getUserMediaWithTimeout({
-        audio: { mandatory: desktopConstraints } as unknown as MediaTrackConstraints,
-        video: { mandatory: desktopConstraints } as unknown as MediaTrackConstraints,
-      } as MediaStreamConstraints, 5000);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          mandatory: { chromeMediaSource: 'desktop' },
+        } as unknown as MediaTrackConstraints,
+        video: {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId },
+        } as unknown as MediaTrackConstraints,
+      });
 
       // video 트랙은 즉시 종료 (오디오만 필요)
       stream.getVideoTracks().forEach((t) => t.stop());
 
       const audioTrack = stream.getAudioTracks()[0];
       if (!audioTrack) throw new Error('시스템 오디오 트랙 없음 — 사운드 카드 설정을 확인해 주세요');
-      this.sysStream = stream;
-      this.sysSource = this.ctx.createMediaStreamSource(new MediaStream([audioTrack]));
+
+      // ── 디버깅: 트랙 생존 여부 확인 ──
+      console.log('🎙️ Track Settings:', audioTrack.getSettings());
+      console.log('🎙️ Track Status (muted/enabled):', audioTrack.muted, audioTrack.enabled);
+
+      // 오디오 트랙만 있는 새 MediaStream — stream.active = true 보장
+      this.sysStream = new MediaStream([audioTrack]);
+      this.sysSource = this.ctx.createMediaStreamSource(this.sysStream);
       this.sysSource.connect(this.sysAnalyser);
       return;
     }
@@ -365,6 +372,19 @@ class AudioRouter {
     };
     rafId = requestAnimationFrame(check);
     return () => cancelAnimationFrame(rafId);
+  }
+
+  // ── Silero VAD (WebAssembly) — RMS 폴백 자동 적용 ────────
+  // attachVAD()를 통해 기존 캡처된 스트림에 신경망 VAD를 붙임
+  // muteUntilRef(sysMuteUntilRef)로 TTS 재생 중 AEC 게이트 적용
+  async startVADWeb(
+    source: 'mic' | 'sys',
+    callbacks: VADCallbacks,
+    options?: VADOptions & { muteUntilRef?: MutableRefObject<number> }
+  ): Promise<() => void> {
+    const stream = source === 'mic' ? this.micStream : this.sysStream;
+    if (!stream) throw new Error(`[AudioRouter] ${source} 스트림이 없습니다 — capture 먼저 호출하세요`);
+    return attachVAD(stream, callbacks, options);
   }
 
   getMicStream(): MediaStream | null { return this.micStream; }
@@ -431,6 +451,14 @@ export function useAudioRouter() {
       getRouter().startVAD(source, onSilence, opts),
     [getRouter]
   );
+  const startVADWeb = useCallback(
+    (
+      source: 'mic' | 'sys',
+      callbacks: VADCallbacks,
+      options?: VADOptions & { muteUntilRef?: MutableRefObject<number> }
+    ) => getRouter().startVADWeb(source, callbacks, options),
+    [getRouter]
+  );
 
   useEffect(() => {
     refreshDevices();
@@ -447,7 +475,7 @@ export function useAudioRouter() {
     captureMic, captureSystemAudio,
     setMicDevice, setVirtualMicDevice, setEarphoneDevice, startVirtualMicPlayback,
     routeTTSToVirtualMic, routeTTSToEarphone, routeMP3ToVirtualMic, playBlobToVirtualMic, playBlobToEarphone, stopAllTTS,
-    getVirtualMicStream, getMicLevel, getSysLevel, startVAD,
+    getVirtualMicStream, getMicLevel, getSysLevel, startVAD, startVADWeb,
     getMicStream, getSysStream,
     get isMicActive() { return routerRef.current?.isMicActive ?? false; },
     get isSysActive() { return routerRef.current?.isSysActive ?? false; },
