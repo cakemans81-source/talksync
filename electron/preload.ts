@@ -30,4 +30,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 클린업 함수 반환
     return () => ipcRenderer.removeListener('oauth-callback', handler);
   },
+
+  // Windows 기본 오디오 출력 → CABLE-B 전환 & 원본 복원
+  enableCableRouting: (): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('audio:enable-cable-routing'),
+  disableCableRouting: (): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('audio:disable-cable-routing'),
 });

@@ -37,7 +37,7 @@ export function DeviceSelector({ label, devices, value, onChange, hint, requires
         <div className="mt-1 flex items-start gap-2 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-xl">
           <span className="text-amber-500 text-sm mt-0.5">⚠</span>
           <div className="text-xs text-amber-700 leading-relaxed">
-            <p className="font-medium mb-0.5">VB-CABLE 미설치</p>
+            <p className="font-medium mb-0.5">가상 오디오 드라이버 미설치</p>
             <p>Discord/Teams 마이크 연결에 필요해요.</p>
             <a
               href="https://vb-audio.com/Cable/"

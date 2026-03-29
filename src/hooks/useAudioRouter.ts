@@ -1,17 +1,17 @@
 'use client';
 
 import { useRef, useCallback, useEffect, useState, type MutableRefObject } from 'react';
-import { attachVAD, type VADCallbacks, type VADOptions } from '@/lib/systemAudioCapture';
+import { attachVAD, mixStreams, type VADCallbacks, type VADOptions } from '@/lib/systemAudioCapture';
 
 // ─────────────────────────────────────────────
 // 가상 오디오 케이블 설치 & 브라우저 연동 가이드
 //
-// [Windows - VB-Audio Virtual Cable (무료)]
-//   1. https://vb-audio.com/Cable/ → VBCABLE_Driver_Pack45.zip 다운로드
-//   2. VBCABLE_Setup_x64.exe 를 "관리자 권한"으로 실행 후 재부팅
-//   3. 사운드 설정에서 "CABLE Input" / "CABLE Output" 장치 확인
-//   4. Discord/Teams 마이크 설정: "CABLE Output" 선택
-//   5. TalkSync UI 가상 마이크 출력: "CABLE Input" 선택
+// [Windows - TalkSync Virtual Audio Cable (또는 VB-Audio Virtual Cable)]
+//   1. TalkSync 드라이버 설치 (또는 https://vb-audio.com/Cable/)
+//   2. 설치 후 재부팅
+//   3. 사운드 설정에서 TalkSync Tx / TalkSync Rx 장치 확인
+//   4. Discord/Teams 출력 장치: "TalkSync Virtual Audio Cable" 선택
+//   5. TalkSync UI 가상 마이크 출력: "TalkSync Tx" 선택
 //
 // [macOS - BlackHole (무료)]
 //   1. brew install blackhole-2ch  또는 https://existential.audio/blackhole/
@@ -42,12 +42,12 @@ class AudioRouter {
   private sysAnalyser: AnalyserNode;
 
   // [가상 마이크 핵심 구조 — AudioContext.setSinkId 방식]
-  // MP3 → virtualMicCtx(AudioContext) → setSinkId("CABLE Input") → VB-Cable Input
-  // → Discord는 "CABLE Output"을 마이크로 인식
+  // MP3 → virtualMicCtx(AudioContext) → setSinkId("TalkSync Tx") → TalkSync Tx
+  // → Discord는 TalkSync Rx를 마이크로 인식
   // HTMLAudioElement.setSinkId 대신 AudioContext.setSinkId 사용 — 더 신뢰성 높음
   private virtualMicCtx: AudioContextWithSink | null = null;
   // virtualMicCtx를 항상 활성 상태로 유지하는 무음 소스
-  // TTS 없는 순간에도 CABLE Input에 신호를 보내 Discord가 연결을 끊지 않도록 함
+  // TTS 없는 순간에도 TalkSync Tx에 신호를 보내 Discord가 연결을 끊지 않도록 함
   private silentKeepAlive: ConstantSourceNode | null = null;
   // 기존 Web Audio stream 방식 (startVirtualMicPlayback 호환성 유지)
   private virtualMicDest: MediaStreamAudioDestinationNode;
@@ -58,6 +58,9 @@ class AudioRouter {
 
   private micStream: MediaStream | null = null;
   private sysStream: MediaStream | null = null;
+  // Two-Track: 화상회의 수신용 가상 스피커 스트림 (TalkSync Rx)
+  private virtualSpeakerStream: MediaStream | null = null;
+  private mixCleanup: (() => void) | null = null;
 
   // 현재 재생 중인 TTS 소스 (중복 재생 방지용)
   private virtualMicSource: AudioBufferSourceNode | null = null;
@@ -73,9 +76,9 @@ class AudioRouter {
   }
 
   // ── VirtualMic 전용 AudioContext 초기화 ──────
-  // AudioContext.setSinkId()로 CABLE Input에 직접 바인딩
+  // AudioContext.setSinkId()로 TalkSync Tx에 직접 바인딩
   // + 무음 ConstantSourceNode로 컨텍스트를 상시 활성 상태 유지
-  //   → Discord가 CABLE Output을 "활성 마이크"로 지속 인식
+  //   → Discord가 TalkSync Rx를 "활성 마이크"로 지속 인식
   private async getVirtualMicCtx(): Promise<AudioContextWithSink> {
     if (!this.virtualMicCtx) {
       this.virtualMicCtx = new AudioContext() as AudioContextWithSink;
@@ -83,7 +86,7 @@ class AudioRouter {
       console.log('[AudioRouter] AudioContext.setSinkId 지원:', typeof this.virtualMicCtx.setSinkId === 'function');
       await this.applyCtxSinkId(this.virtualMicCtx, this.virtualMicDeviceId);
 
-      // 무음(0 게인) 상시 신호 → CABLE Input 연결 유지
+      // 무음(0 게인) 상시 신호 → TalkSync Tx 연결 유지
       const silentGain = this.virtualMicCtx.createGain();
       silentGain.gain.value = 0;
       this.silentKeepAlive = this.virtualMicCtx.createConstantSource();
@@ -212,8 +215,8 @@ class AudioRouter {
     });
   }
 
-  // ── MP3 ArrayBuffer → 가상 마이크 (VB-Cable) ─
-  // AudioContext.setSinkId()로 CABLE Input에 직접 라우팅 (Chrome 110+)
+  // ── MP3 ArrayBuffer → 가상 마이크 (TalkSync Tx) ─
+  // AudioContext.setSinkId()로 TalkSync Tx에 직접 라우팅 (Chrome 110+)
   // HTMLAudioElement.setSinkId보다 신뢰성 높음
   async routeMP3ToVirtualMic(mp3: ArrayBuffer): Promise<void> {
     const ctx = await this.getVirtualMicCtx();
@@ -328,6 +331,38 @@ class AudioRouter {
     this.sysSource.connect(this.sysAnalyser);
   }
 
+  // ── Two-Track: 화상회의 수신 스트림 캡처 (TalkSync Rx) ──
+  async captureVirtualSpeaker(deviceId: string): Promise<void> {
+    if (this.ctx.state === 'suspended') await this.ctx.resume();
+    const constraints: MediaTrackConstraints = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      sampleRate: 16000,
+    };
+    if (deviceId && deviceId !== 'default') constraints.deviceId = { exact: deviceId };
+    this.virtualSpeakerStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+  }
+
+  // ── Two-Track: 물리 마이크 + 가상 스피커 믹싱 → 단일 스트림 ──
+  async captureMixed(micId: string, virtualSpeakerId: string): Promise<MediaStream> {
+    // 물리 마이크 캡처
+    if (!this.micStream || !this.micStream.active) {
+      this.micDeviceId = micId;
+      await this.captureMic();
+    }
+    // 화상회의 수신 스트림 캡처
+    if (this.mixCleanup) { this.mixCleanup(); this.mixCleanup = null; }
+    await this.captureVirtualSpeaker(virtualSpeakerId);
+
+    if (!this.micStream || !this.virtualSpeakerStream) {
+      throw new Error('[AudioRouter] 믹싱 실패 — 스트림 캡처 오류');
+    }
+    const { mixed, cleanup } = mixStreams(this.micStream, this.virtualSpeakerStream);
+    this.mixCleanup = cleanup;
+    return mixed;
+  }
+
   getVirtualMicStream(): MediaStream { return this.virtualMicDest.stream; }
 
   getMicLevel(): number {
@@ -378,12 +413,17 @@ class AudioRouter {
   // attachVAD()를 통해 기존 캡처된 스트림에 신경망 VAD를 붙임
   // muteUntilRef(sysMuteUntilRef)로 TTS 재생 중 AEC 게이트 적용
   async startVADWeb(
-    source: 'mic' | 'sys',
+    source: 'mic' | 'sys' | MediaStream,
     callbacks: VADCallbacks,
     options?: VADOptions & { muteUntilRef?: MutableRefObject<number> }
   ): Promise<() => void> {
-    const stream = source === 'mic' ? this.micStream : this.sysStream;
-    if (!stream) throw new Error(`[AudioRouter] ${source} 스트림이 없습니다 — capture 먼저 호출하세요`);
+    let stream: MediaStream | null;
+    if (source instanceof MediaStream) {
+      stream = source;
+    } else {
+      stream = source === 'mic' ? this.micStream : this.sysStream;
+    }
+    if (!stream) throw new Error(`[AudioRouter] 스트림이 없습니다 — capture 먼저 호출하세요`);
     return attachVAD(stream, callbacks, options);
   }
 
@@ -453,10 +493,14 @@ export function useAudioRouter() {
   );
   const startVADWeb = useCallback(
     (
-      source: 'mic' | 'sys',
+      source: 'mic' | 'sys' | MediaStream,
       callbacks: VADCallbacks,
       options?: VADOptions & { muteUntilRef?: MutableRefObject<number> }
     ) => getRouter().startVADWeb(source, callbacks, options),
+    [getRouter]
+  );
+  const captureMixed = useCallback(
+    (micId: string, virtualSpeakerId: string) => getRouter().captureMixed(micId, virtualSpeakerId),
     [getRouter]
   );
 
@@ -472,7 +516,7 @@ export function useAudioRouter() {
 
   return {
     devices, refreshDevices,
-    captureMic, captureSystemAudio,
+    captureMic, captureSystemAudio, captureMixed,
     setMicDevice, setVirtualMicDevice, setEarphoneDevice, startVirtualMicPlayback,
     routeTTSToVirtualMic, routeTTSToEarphone, routeMP3ToVirtualMic, playBlobToVirtualMic, playBlobToEarphone, stopAllTTS,
     getVirtualMicStream, getMicLevel, getSysLevel, startVAD, startVADWeb,

@@ -56,10 +56,16 @@ export type GeminiLiveConfig = {
    */
   outputDeviceId?: string;
   /**
-   * VB-CABLE 가상 마이크 출력 장치 ID — Discord/Teams 전달용
+   * TalkSync 가상 마이크 출력 장치 ID — Discord/Teams 전달용
    * earphone 과 동시에 PCM 재생 (setSinkId 라우팅)
    */
   virtualMicDeviceId?: string;
+  /**
+   * true: 이어폰(로컬) 출력 차단 — TalkSync Tx 전용 세션에 사용
+   * 내 마이크 번역이 이어폰으로 역류하는 메아리 현상 방지
+   * 기본: false
+   */
+  muteLocalOutput?: boolean;
   /**
    * 입력 오디오 샘플레이트 (systemAudioCapture.ts는 16000Hz 고정)
    * 기본: 16000
@@ -127,7 +133,7 @@ export function useGeminiLive() {
   // 다음 청크를 재생할 AudioContext 타임라인 포인터 (초 단위)
   // 이전 청크 종료 시각에 새 청크를 이어 붙여 갭 없는 연속 재생 보장
   const nextPlayTimeRef = useRef<number>(0);
-  // VB-CABLE AudioContext + 재생 타임라인
+  // TalkSync Tx AudioContext + 재생 타임라인
   const vbCtxRef = useRef<AudioContextWithSink | null>(null);
   const nextVbPlayTimeRef = useRef<number>(0);
 
@@ -183,8 +189,9 @@ export function useGeminiLive() {
     if (float32.length === 0) return;
 
     // ── 이어폰 AudioContext ──────────────────────────────────
+    // muteLocalOutput: true 인 세션(내 마이크 전용)은 이어폰 출력 차단
     const ctx = ctxRef.current;
-    if (ctx && ctx.state !== 'closed') {
+    if (ctx && ctx.state !== 'closed' && !configRef.current?.muteLocalOutput) {
       const audioBuffer = ctx.createBuffer(1, float32.length, OUTPUT_SAMPLE_RATE);
       audioBuffer.copyToChannel(float32 as Float32Array<ArrayBuffer>, 0);
       const source = ctx.createBufferSource();
@@ -193,12 +200,12 @@ export function useGeminiLive() {
       const startAt = Math.max(ctx.currentTime + 0.02, nextPlayTimeRef.current);
       source.start(startAt);
       nextPlayTimeRef.current = startAt + audioBuffer.duration;
-      // AEC 게이트 갱신
+      // AEC 게이트 갱신 — 이어폰 출력이 있을 때만 (메아리 방지용)
       const remainingMs = Math.max(0, nextPlayTimeRef.current - ctx.currentTime) * 1000;
-      muteUntilRef.current = Date.now() + remainingMs + 5000;
+      muteUntilRef.current = Date.now() + remainingMs + 300;
     }
 
-    // ── VB-CABLE AudioContext (이어폰과 동시 송출) ───────────
+    // ── TalkSync Tx AudioContext (이어폰과 동시 송출) ─────────
     const vbCtx = vbCtxRef.current;
     if (vbCtx && vbCtx.state !== 'closed') {
       const audioBuffer = vbCtx.createBuffer(1, float32.length, OUTPUT_SAMPLE_RATE);
@@ -306,7 +313,7 @@ export function useGeminiLive() {
       const ctx = await getCtx(config.outputDeviceId);
       nextPlayTimeRef.current = ctx.currentTime;
 
-      // VB-CABLE AudioContext 초기화
+      // TalkSync Tx AudioContext 초기화
       if (config.virtualMicDeviceId && config.virtualMicDeviceId !== 'default') {
         if (!vbCtxRef.current || vbCtxRef.current.state === 'closed') {
           vbCtxRef.current = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE }) as AudioContextWithSink;
@@ -315,9 +322,9 @@ export function useGeminiLive() {
         if (typeof vbCtxRef.current.setSinkId === 'function') {
           try {
             await vbCtxRef.current.setSinkId(config.virtualMicDeviceId);
-            console.log('[GeminiLive] VB-CABLE 출력 장치 →', config.virtualMicDeviceId);
+            console.log('[GeminiLive] TalkSync Tx 출력 장치 →', config.virtualMicDeviceId);
           } catch (e) {
-            console.warn('[GeminiLive] VB-CABLE setSinkId 실패:', e);
+            console.warn('[GeminiLive] TalkSync Tx setSinkId 실패:', e);
           }
         }
         nextVbPlayTimeRef.current = vbCtxRef.current.currentTime;
@@ -515,5 +522,12 @@ export function useGeminiLive() {
      * null 전달 시 콜백 해제
      */
     setSubtitleCallback,
+    /**
+     * 런타임 muteLocalOutput 토글 — 재연결 없이 즉시 적용
+     * true: 이어폰 출력 차단(기본), false: 이어폰으로도 재생(모니터링)
+     */
+    setMonitorOutput: (enabled: boolean) => {
+      if (configRef.current) configRef.current.muteLocalOutput = !enabled;
+    },
   };
 }

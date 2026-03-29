@@ -36,6 +36,12 @@ export type PcmChunk = {
 export type VADCallbacks = {
   onSpeechStart?: () => void;
   onSpeechEnd: (chunk: PcmChunk) => void;
+  /**
+   * 발화 중 실시간 오디오 스트리밍 콜백 (저지연 모드)
+   * 설정 시: 말하는 도중 100ms 단위로 base64 PCM을 전달 → Gemini가 즉시 번역 시작
+   * 설정 시 onSpeechEnd에서는 오디오를 재전송하지 않음 (중복 방지)
+   */
+  onSpeechFrame?: (base64: string) => void;
   /** Silero VAD 초기화 실패 시 호출 (RMS 폴백으로 계속 동작) */
   onVADFallback?: (reason: string) => void;
 };
@@ -62,6 +68,35 @@ export type VADOptions = {
   /** 최소 발화 인정 시간 (ms). 기본: 150ms */
   minSpeechMs?: number;
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 듀얼 스트림 믹서
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 두 개의 MediaStream을 하나로 믹싱합니다.
+ * Web Audio API: srcA + srcB → MediaStreamDestinationNode → mixed stream
+ *
+ * @param streamA 물리 마이크 스트림
+ * @param streamB 화상회의 수신 스트림 (TalkSync Rx)
+ * @returns { mixed: MediaStream, cleanup: () => void }
+ */
+export function mixStreams(
+  streamA: MediaStream,
+  streamB: MediaStream,
+): { mixed: MediaStream; cleanup: () => void } {
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  const srcA = ctx.createMediaStreamSource(streamA);
+  const srcB = ctx.createMediaStreamSource(streamB);
+  const dest = ctx.createMediaStreamDestination();
+  srcA.connect(dest);
+  srcB.connect(dest);
+  if (ctx.state === 'suspended') ctx.resume();
+  return {
+    mixed: dest.stream,
+    cleanup: () => { try { ctx.close(); } catch { /* 이미 종료됨 */ } },
+  };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PCM 변환 유틸리티
@@ -126,6 +161,22 @@ export async function attachVAD(
     // AudioContext를 외부에서 생성하여 주입 → start() 후 강제 resume 가능
     const vadCtx = new AudioContext();
 
+    // ── 실시간 스트리밍: 100ms(1600샘플 @ 16kHz) 단위로 전송 ──────
+    const STREAM_CHUNK_SAMPLES = 1600; // 16000Hz × 0.1s
+    let isSpeakingVAD = false;
+    let streamFrameBuffer: Float32Array[] = [];
+    let streamFrameSamples = 0;
+
+    const flushStreamBuffer = () => {
+      if (streamFrameBuffer.length === 0 || !callbacks.onSpeechFrame || isMuted()) return;
+      const combined = new Float32Array(streamFrameSamples);
+      let off = 0;
+      for (const f of streamFrameBuffer) { combined.set(f, off); off += f.length; }
+      streamFrameBuffer = [];
+      streamFrameSamples = 0;
+      callbacks.onSpeechFrame(float32ToBase64Pcm(combined));
+    };
+
     const vad = await MicVAD.new({
       // 기존 캡처된 스트림을 사용 (mic 새 캡처 X)
       audioContext: vadCtx,
@@ -148,31 +199,48 @@ export async function attachVAD(
       minSpeechMs,
 
       // ── Electron app:// 프로토콜 호환 설정 ──────────────────────
-      // COOP/COEP로 crossOriginIsolated가 활성화되면 threaded WASM이 정상 동작.
-      // 혹시 SharedArrayBuffer가 없는 환경이라면 wasmPaths를 명시하여
-      // 경로 해석 오류를 방지하고, 에러 시 RMS 폴백으로 낙하산 착지.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ortConfig: (ort: any) => {
         if (typeof ort?.env?.wasm === 'object') {
-          // WASM 파일 위치를 절대 경로로 고정 (Electron pathname 해석 불일치 방지)
           ort.env.wasm.wasmPaths = ONNX_WASM_BASE_PATH;
         }
       },
 
       onSpeechStart: () => {
+        isSpeakingVAD = true;
+        streamFrameBuffer = [];
+        streamFrameSamples = 0;
         if (!isMuted()) callbacks.onSpeechStart?.();
       },
       onSpeechEnd: (audio: Float32Array) => {
+        isSpeakingVAD = false;
+        // onSpeechFrame 스트리밍 모드: 잔여 버퍼 flush 후 종료 신호만 전달
+        if (callbacks.onSpeechFrame) {
+          flushStreamBuffer();
+          if (!isMuted()) callbacks.onSpeechEnd(toPcmChunk(new Float32Array(0)));
+          return;
+        }
+        // 기존 batch 모드: 전체 청크를 한 번에 전송
         if (isMuted()) return;
-
-        // 2차 RMS 게이트: VAD를 통과했지만 에너지가 너무 낮은 잡음 필터링
         const rms = Math.sqrt(audio.reduce((s, v) => s + v * v, 0) / audio.length);
         if (rms < minRms) return;
-
         callbacks.onSpeechEnd(toPcmChunk(audio));
       },
-      onVADMisfire: () => {},
-      onFrameProcessed: () => {},
+      onVADMisfire: () => {
+        isSpeakingVAD = false;
+        streamFrameBuffer = [];
+        streamFrameSamples = 0;
+      },
+      // 발화 중 프레임별 오디오 수신 → 100ms 단위로 누적 후 전송
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      onFrameProcessed: (probs: any, frameAudio?: Float32Array) => {
+        if (!isSpeakingVAD || isMuted() || !callbacks.onSpeechFrame || !frameAudio) return;
+        streamFrameBuffer.push(frameAudio.slice(0));
+        streamFrameSamples += frameAudio.length;
+        if (streamFrameSamples >= STREAM_CHUNK_SAMPLES) {
+          flushStreamBuffer();
+        }
+      },
       onSpeechRealStart: () => {},
     });
 

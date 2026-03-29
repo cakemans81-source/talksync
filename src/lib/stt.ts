@@ -320,7 +320,7 @@ export class GeminiSTTManager {
         console.warn(
           `[GeminiSTT] ${source} 오디오 데이터 없음 — ` +
           `"내 마이크 입력"에서 실제 마이크를 선택했는지 확인해 주세요. ` +
-          `(기본 장치가 CABLE Output일 수 있습니다)`
+          `(기본 장치가 TalkSync Virtual Audio Cable일 수 있습니다)`
         );
         if (source === 'mic') this.onMicInterim?.(''); // 인식 중... 클리어
         if (this.isRunning) this.scheduleCapture(source);

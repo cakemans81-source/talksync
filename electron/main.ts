@@ -2,7 +2,7 @@
 const { app, BrowserWindow, ipcMain, desktopCapturer, shell, protocol, net } = require('electron') as typeof import('electron');
 import path from 'path';
 import { pathToFileURL } from 'url';
-import { execFile } from 'child_process';
+import { execFile, spawnSync } from 'child_process';
 import fs from 'fs';
 
 const PROTOCOL = 'talksync';
@@ -79,6 +79,9 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  // 오디오 라우팅 PowerShell 스크립트 초기화 (임시 디렉토리)
+  try { initAudioScripts(app.getPath('temp')); } catch (e) { console.warn('[audio scripts init]', e); }
+
   // app:// 요청을 out/ 폴더의 정적 파일로 라우팅
   // COOP/COEP 헤더 추가 → crossOriginIsolated = true → SharedArrayBuffer 활성화
   //   SharedArrayBuffer는 onnxruntime-web(threaded WASM)이 필수로 요구
@@ -115,6 +118,127 @@ app.whenReady().then(() => {
       callback({ requestHeaders: details.requestHeaders });
     }
   );
+});
+
+// ── Windows 오디오 기본 출력 장치 복원 ────────────────────────────
+// CABLE-B 라우팅 활성화 시 기존 장치를 저장, 앱 종료 시 자동 복원
+let savedOutputDeviceId: string | null = null;
+let audioRestoringFlag = false;
+
+// 임시 .ps1 파일 경로 (app.whenReady 이후 초기화)
+let ps1GetDefault = '';
+let ps1FindCableB = '';
+let ps1SetDefault = '';
+
+function initAudioScripts(tmpDir: string) {
+  ps1GetDefault = path.join(tmpDir, 'ts_audio_get.ps1');
+  ps1FindCableB = path.join(tmpDir, 'ts_audio_find_cb.ps1');
+  ps1SetDefault = path.join(tmpDir, 'ts_audio_set.ps1');
+
+  // 현재 기본 출력 장치 ID 취득 — WinRT로 얻은 전체 ID에서 PolicyConfig 호환 형식 추출
+  // WinRT 반환: \\?\SWD#MMDEVAPI#{0.0.0.00000000}.{GUID}#{interface-guid}
+  // PolicyConfig 필요: {0.0.0.00000000}.{GUID}
+  fs.writeFileSync(ps1GetDefault, [
+    'Add-Type -AssemblyName System.Runtime.WindowsRuntime',
+    '[void][Windows.Media.Devices.MediaDevice,Windows.Media,ContentType=WindowsRuntime]',
+    '$id=[Windows.Media.Devices.MediaDevice]::GetDefaultAudioRenderId([Windows.Media.Devices.AudioDeviceRole]::Default)',
+    'if($id -match "#(\\{[0-9\\.]+\\}\\.\\{[0-9a-fA-F\\-]+\\})#"){Write-Output $matches[1]}else{Write-Output $id}',
+  ].join('\r\n'), 'utf8');
+
+  // Get-PnpDevice 기반 TalkSync Virtual Audio Cable 탐색 — 레지스트리 FriendlyName이 "스피커"만 저장되어 있어 Get-PnpDevice로 전체 이름 검색
+  fs.writeFileSync(ps1FindCableB, [
+    '$dev=Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object{$_.FriendlyName -imatch "talksync virtual audio cable" -and $_.InstanceId -match "^SWD\\\\MMDEVAPI\\\\\\{0\\.0\\.0\\."}|Select-Object -First 1',
+    'if($dev -and $dev.InstanceId -match "\\{([0-9a-fA-F\\-]+)\\}$"){Write-Output $matches[1]}',
+  ].join('\r\n'), 'utf8');
+
+  // PolicyConfig COM 인터페이스로 Windows 기본 출력 장치 변경 (Vista ~ Win11 지원)
+  fs.writeFileSync(ps1SetDefault, [
+    'param([string]$DeviceId)',
+    'Add-Type -Language CSharp -TypeDefinition @\'',
+    'using System.Runtime.InteropServices;',
+    '[ComImport,Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]class CPolicyConfigClient{}',
+    '[Guid("f8679f50-850a-41cf-9c72-430f290290c8"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]',
+    'interface IPolicyConfig{',
+    '  void n0();void n1();void n2();void n3();void n4();',
+    '  void n5();void n6();void n7();void n8();void n9();',
+    '  [PreserveSig]int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)]string id,int role);}',
+    'public class AD{public static void Set(string id){',
+    '  var p=(IPolicyConfig)new CPolicyConfigClient();',
+    '  p.SetDefaultEndpoint(id,0);p.SetDefaultEndpoint(id,1);p.SetDefaultEndpoint(id,2);}}',
+    '\'@',
+    '[AD]::Set($DeviceId)',
+  ].join('\r\n'), 'utf8');
+}
+
+function psAsync(file: string, args: string[] = []): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile('powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file, ...args],
+      { timeout: 12000 },
+      (err, stdout, stderr) => {
+        if (err) reject(new Error(`${err.message}\n${stderr}`));
+        else resolve(stdout.trim());
+      });
+  });
+}
+
+function psSync(file: string, args: string[] = []): string {
+  const r = spawnSync('powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file, ...args],
+    { timeout: 12000 });
+  if (r.error) throw r.error;
+  return (r.stdout || '').toString().trim();
+}
+
+// ── 오디오 라우팅 IPC ──────────────────────────────────────────────
+// enable: 현재 기본 출력 저장 → TalkSync Virtual Audio Cable로 전환
+ipcMain.handle('audio:enable-cable-routing', async () => {
+  if (!ps1GetDefault) return { ok: false, reason: 'scripts not initialized' };
+  try {
+    const currentId = await psAsync(ps1GetDefault);
+    if (!currentId) return { ok: false, reason: '현재 출력 장치 ID를 가져올 수 없습니다' };
+    savedOutputDeviceId = currentId;
+
+    const cableBId = await psAsync(ps1FindCableB);
+    if (!cableBId) return { ok: false, reason: 'TalkSync Virtual Audio Cable 장치를 찾을 수 없습니다' };
+
+    await psAsync(ps1SetDefault, ['-DeviceId', cableBId]);
+    console.log('[audio] TalkSync 라우팅 활성화. 원래 장치:', currentId);
+    return { ok: true };
+  } catch (e) {
+    console.error('[audio:enable-cable-routing]', e);
+    return { ok: false, reason: String(e) };
+  }
+});
+
+// disable: 저장된 원래 장치로 복원
+ipcMain.handle('audio:disable-cable-routing', async () => {
+  if (!savedOutputDeviceId) return { ok: false, reason: 'no saved device' };
+  try {
+    const id = savedOutputDeviceId;
+    savedOutputDeviceId = null;
+    await psAsync(ps1SetDefault, ['-DeviceId', id]);
+    console.log('[audio] 원래 출력 장치 복원:', id);
+    return { ok: true };
+  } catch (e) {
+    console.error('[audio:disable-cable-routing]', e);
+    return { ok: false, reason: String(e) };
+  }
+});
+
+// ── 앱 종료 시 자동 복원 ─────────────────────────────────────────
+app.on('will-quit', (event) => {
+  if (!savedOutputDeviceId || audioRestoringFlag) return;
+  event.preventDefault();
+  audioRestoringFlag = true;
+  const id = savedOutputDeviceId;
+  savedOutputDeviceId = null;
+  psAsync(ps1SetDefault, ['-DeviceId', id])
+    .catch((e) => console.error('[will-quit audio restore]', e))
+    .finally(() => {
+      audioRestoringFlag = false;
+      app.quit();
+    });
 });
 
 app.on('window-all-closed', () => {

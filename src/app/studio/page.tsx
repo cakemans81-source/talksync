@@ -215,9 +215,9 @@ function VirtualCableGuard({ onDetected }: { onDetected: () => void }) {
           <div className="flex items-start gap-3 p-4 bg-blue-50 rounded-2xl border border-blue-100">
             <span className="text-xl mt-0.5">🪟</span>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-blue-900">Windows — VB-CABLE (무료)</p>
+              <p className="text-sm font-semibold text-blue-900">Windows — TalkSync Virtual Audio Cable</p>
               <p className="text-xs text-blue-600 mt-1 leading-relaxed">
-                VBCABLE_Driver_Pack 다운로드 → VBCABLE_Setup_x64.exe 관리자 실행 → 재부팅
+                TalkSync 드라이버 설치 → 재부팅 (또는 VB-CABLE 사용 가능)
               </p>
               <button
                 onClick={() => openExternal('https://vb-audio.com/Cable/')}
@@ -1330,10 +1330,10 @@ export default function StudioPage() {
                     {[
                       {
                         icon: '🔌',
-                        title: 'VB-CABLE 자동 감지',
-                        desc: cableDetected ? 'CABLE Input이 자동으로 선택됐어요' : 'VB-CABLE이 감지되지 않았어요 — 아래 링크에서 설치 후 새로고침하세요',
+                        title: 'TalkSync 가상 오디오 감지',
+                        desc: cableDetected ? 'TalkSync Virtual Audio Cable이 자동으로 선택됐어요' : '가상 오디오 드라이버가 감지되지 않았어요 — 설치 후 새로고침하세요',
                         done: cableDetected,
-                        action: !cableDetected ? { label: 'VB-CABLE 설치', href: 'https://vb-audio.com/Cable/' } : undefined,
+                        action: !cableDetected ? { label: '드라이버 설치', href: 'https://vb-audio.com/Cable/' } : undefined,
                       },
                       {
                         icon: '🎧',
@@ -1343,8 +1343,8 @@ export default function StudioPage() {
                       },
                       {
                         icon: '💬',
-                        title: 'Discord 마이크를 CABLE Output으로 변경',
-                        desc: 'Discord → ⚙️ 설정 → 음성 및 비디오 → 입력 장치 → "CABLE Output" 선택',
+                        title: 'Discord 출력을 TalkSync Virtual Audio Cable로 변경',
+                        desc: 'Discord → ⚙️ 설정 → 음성 및 비디오 → 출력 장치 → "TalkSync Virtual Audio Cable" 선택',
                         done: false,
                       },
                       {
@@ -1481,8 +1481,8 @@ export default function StudioPage() {
                   <div className="flex items-center gap-2.5 py-2.5 px-4 bg-amber-50 border border-amber-200 rounded-2xl">
                     <span className="text-amber-500 text-base">⚠️</span>
                     <div className="flex-1">
-                      <p className="text-sm font-medium text-amber-800">가상 오디오 케이블(VB-CABLE) 설치가 필요합니다</p>
-                      <p className="text-[11px] text-amber-600 mt-0.5">Discord/Teams로 번역 음성을 전달하려면 VB-CABLE 드라이버가 필요해요</p>
+                      <p className="text-sm font-medium text-amber-800">가상 오디오 드라이버 설치가 필요합니다</p>
+                      <p className="text-[11px] text-amber-600 mt-0.5">Discord/Teams로 번역 음성을 전달하려면 TalkSync 가상 오디오 드라이버가 필요해요</p>
                     </div>
                     <div className="flex gap-2 shrink-0">
                       <button
