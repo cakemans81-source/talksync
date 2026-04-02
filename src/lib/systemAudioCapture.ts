@@ -47,27 +47,82 @@ export type VADCallbacks = {
 };
 
 export type VADOptions = {
-  /**
-   * TTS 재생 중에는 sys 오디오 무시 (AEC 게이트)
-   * Date.now() < muteUntilRef.current 이면 onSpeechEnd 콜백 억제
-   */
+  /** TTS 재생 중에는 sys 오디오 무시 (AEC 게이트) */
   muteUntilRef?: MutableRefObject<number>;
-  /**
-   * 추가 RMS 임계값 필터 (VAD 통과 후 2차 에너지 게이트)
-   * 기본: 0.004 (매우 조용한 잡음 필터링)
-   */
+  /** 2차 RMS 에너지 게이트. 기본: 0.005 (숨소리 필터) */
   minRms?: number;
   /**
-   * 침묵 감지 후 발화 종료까지 대기 시간 (ms)
-   * 낮을수록 빠르게 반응, 높을수록 말 중간 끊김 방지
-   * 기본: 400ms (라이브러리 기본값 1400ms 대비 최적화)
+   * 침묵 감지 후 발화 종료까지 대기 시간 (ms). 기본: 700ms
+   * 통번역 UX: 절 간 포즈(450ms) 초과 보장 → 문장 중간 끊김 방지
    */
   redemptionMs?: number;
-  /** 발화 종료 민감도 (0~1, 높을수록 빠름). 기본: 0.45 */
+  /**
+   * 발화 종료 민감도 (0~1). 기본: 0.35
+   * 히스테리시스 갭 = 0.50 - 0.35 = 0.15p → 문장 내 짧은 포즈에서 오검출 방지
+   */
   negativeSpeechThreshold?: number;
-  /** 최소 발화 인정 시간 (ms). 기본: 150ms */
+  /**
+   * 최소 발화 인정 시간 (ms). 기본: 300ms
+   * 기침(100~280ms) 95% 차단, 단음절 어절 보존
+   */
   minSpeechMs?: number;
+  /**
+   * RMS 폴백 침묵 판단 시간 (ms). 기본: redemptionMs + 200ms
+   * 핵심 공식: rmsTimeoutMs > redemptionMs → Silero가 항상 먼저 실행됨
+   */
+  rmsTimeoutMs?: number;
+  /**
+   * 무한 발화 방지 하드 캡 (ms). 기본: 15000ms
+   * 이 시간 초과 시 강제 EoT → Gemini 응답 보장
+   */
+  maxSpeechMs?: number;
 };
+
+// ── 통번역 최적화 VAD 프리셋 ─────────────────────────────────────────────────
+// rmsTimeoutMs = redemptionMs + 200ms (동적 공식)
+// ∴ Silero 정상 시 T_silero < T_rms → Silero가 항상 먼저 EoT 실행
+// ∴ Silero 실패 시 T_rms = redemptionMs + 200ms (프리셋 의도 유지)
+const FALLBACK_BUFFER_MS = 200;
+export type VADPreset = 'fast' | 'balanced' | 'accurate';
+export const VAD_TRANSLATION_PRESETS: Record<VADPreset, Required<Omit<VADOptions, 'muteUntilRef'>>> = {
+  /**
+   * 빠름: 짧은 문장, 즉각 반응
+   * L_total ≈ 500 + 700ms = 1200ms ✓
+   */
+  fast: {
+    redemptionMs: 500,
+    negativeSpeechThreshold: 0.42,
+    minSpeechMs: 260,
+    minRms: 0.006,
+    rmsTimeoutMs: 500 + FALLBACK_BUFFER_MS, // 700ms
+    maxSpeechMs: 12000,
+  },
+  /**
+   * 보통: 통번역 UX 최적 균형 (권장)
+   * L_total ≈ 700 + 700ms = 1400ms ✓
+   */
+  balanced: {
+    redemptionMs: 700,
+    negativeSpeechThreshold: 0.35,
+    minSpeechMs: 300,
+    minRms: 0.005,
+    rmsTimeoutMs: 700 + FALLBACK_BUFFER_MS, // 900ms
+    maxSpeechMs: 15000,
+  },
+  /**
+   * 정확: 생각하는 포즈가 있는 화자
+   * L_total ≈ 1000 + 700ms = 1700ms ✓
+   */
+  accurate: {
+    redemptionMs: 1000,
+    negativeSpeechThreshold: 0.28,
+    minSpeechMs: 400,
+    minRms: 0.004,
+    rmsTimeoutMs: 1000 + FALLBACK_BUFFER_MS, // 1200ms
+    maxSpeechMs: 20000,
+  },
+};
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 듀얼 스트림 믹서
@@ -148,10 +203,12 @@ export async function attachVAD(
 ): Promise<() => void> {
   const {
     muteUntilRef,
-    minRms = 0.004,
-    redemptionMs = 400,
-    negativeSpeechThreshold = 0.45,
-    minSpeechMs = 150,
+    minRms = 0.005,
+    redemptionMs = 700,
+    negativeSpeechThreshold = 0.35,
+    minSpeechMs = 300,
+    rmsTimeoutMs = redemptionMs + 200, // 동적 공식: 항상 Silero보다 200ms 늘게
+    maxSpeechMs = 15000,
   } = options;
   const isMuted = () => muteUntilRef != null && Date.now() < muteUntilRef.current;
 
@@ -277,13 +334,25 @@ export async function attachVAD(
 function attachRmsVAD(
   stream: MediaStream,
   callbacks: VADCallbacks,
-  options: { muteUntilRef?: MutableRefObject<number>; minRms?: number } = {}
+  options: {
+    muteUntilRef?: MutableRefObject<number>;
+    minRms?: number;
+    rmsTimeoutMs?: number;   // 동적 침리 판단 시간 (항상 redemptionMs+200ms)
+    minSpeechMs?: number;    // 최소 발화 인정 시간
+    maxSpeechMs?: number;    // 무한 발화 하드 켜
+  } = {}
 ): () => void {
-  const { muteUntilRef, minRms = 0.01 } = options;
+  const {
+    muteUntilRef,
+    minRms = 0.01,
+    rmsTimeoutMs = 900,   // balanced 기본: 700+200
+    minSpeechMs = 300,
+    maxSpeechMs = 15000,
+  } = options;
   const isMuted = () => muteUntilRef != null && Date.now() < muteUntilRef.current;
 
+  const SILENCE_MS = rmsTimeoutMs; // 동적 적용 (500ms 하드코딩 제거)
   const SAMPLE_RATE = 16000;
-  const SILENCE_MS = 500;
 
   const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
   const src = ctx.createMediaStreamSource(stream);
@@ -295,7 +364,9 @@ function attachRmsVAD(
   let silenceStart: number | null = null;
   let isSpeaking = false;
   let speechBuffer: Float32Array[] = [];
+  let speechStartTime = 0;
   let rafId: number;
+  let maxSpeechTimer: ReturnType<typeof setTimeout> | null = null;
 
   const check = () => {
     analyser.getFloatTimeDomainData(buf);
@@ -314,7 +385,22 @@ function attachRmsVAD(
     if (rms >= minRms) {
       if (!isSpeaking) {
         isSpeaking = true;
+        speechStartTime = Date.now();
         callbacks.onSpeechStart?.();
+        // 하드 켜: 무한 발화 방지
+        if (maxSpeechTimer) clearTimeout(maxSpeechTimer);
+        maxSpeechTimer = setTimeout(() => {
+          if (!isSpeaking) return;
+          isSpeaking = false;
+          silenceStart = null;
+          const total = speechBuffer.reduce((s, b) => s + b.length, 0);
+          const combined = new Float32Array(total);
+          let offset = 0;
+          for (const b of speechBuffer) { combined.set(b, offset); offset += b.length; }
+          speechBuffer = [];
+          console.warn('[RMS VAD] maxSpeechMs 도달 → 강제 EoT');
+          callbacks.onSpeechEnd(toPcmChunk(combined));
+        }, maxSpeechMs);
       }
       silenceStart = null;
       speechBuffer.push(buf.slice(0));
@@ -323,15 +409,23 @@ function attachRmsVAD(
         silenceStart = now;
       } else if (now - silenceStart >= SILENCE_MS) {
         isSpeaking = false;
+        if (maxSpeechTimer) { clearTimeout(maxSpeechTimer); maxSpeechTimer = null; }
 
-        // 발화 구간 PCM 합산
+        // minSpeechMs 게이트: 기침/잡음 제거
+        const speechDuration = silenceStart - speechStartTime;
+        if (speechDuration < minSpeechMs) {
+          speechBuffer = [];
+          silenceStart = null;
+          rafId = requestAnimationFrame(check);
+          return;
+        }
+
         const total = speechBuffer.reduce((s, b) => s + b.length, 0);
         const combined = new Float32Array(total);
         let offset = 0;
         for (const b of speechBuffer) { combined.set(b, offset); offset += b.length; }
         speechBuffer = [];
         silenceStart = null;
-
         callbacks.onSpeechEnd(toPcmChunk(combined));
       }
     }
@@ -344,6 +438,7 @@ function attachRmsVAD(
 
   return () => {
     cancelAnimationFrame(rafId);
+    if (maxSpeechTimer) clearTimeout(maxSpeechTimer);
     src.disconnect();
     ctx.close();
   };

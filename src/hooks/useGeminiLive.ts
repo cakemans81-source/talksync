@@ -14,6 +14,7 @@
  */
 
 import { useRef, useCallback, useState, useEffect } from 'react';
+import { WavAccumulator, float32ToInt16Bytes } from '@/lib/wavExporter';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Gemini Multimodal Live API — BidiGenerateContent 엔드포인트
@@ -36,7 +37,7 @@ export type GeminiLiveConfig = {
   apiKey: string;
   /**
    * Gemini Live 지원 모델
-   * 기본: 'models/gemini-2.5-flash-native-audio-preview-12-2025'
+   * 기본: 'models/gemini-3.1-flash-live-preview'
    */
   model?: string;
   /**
@@ -147,6 +148,12 @@ export function useGeminiLive() {
   const muteUntilRef = useRef<number>(0);
 
   const configRef = useRef<GeminiLiveConfig | null>(null);
+  // 자동 재연결 제어
+  const reconnectCountRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const intentionalDisconnectRef = useRef(false); // 의도적 종료 플래그
+  // keepalive ping 타이머
+  const keepaliveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── 자막 추출 Refs ────────────────────────────────────────
   // 모드(초저지연/프리미엄)와 무관하게 part.text를 수집 → turnComplete 시 콜백 실행
@@ -158,6 +165,14 @@ export function useGeminiLive() {
   const customTtsModeRef = useRef<boolean>(false);
   const textAccumulatorRef = useRef<string>('');
   const onTranscriptReadyRef = useRef<((text: string) => void) | null>(null);
+
+  // ── WAV 자동 저장 Refs ────────────────────────────────────
+  // enableWavExport() 호출 시 true → 모든 PCM 청크를 누적 → turnComplete 시 flush
+  const wavExportEnabledRef = useRef<boolean>(false);
+  // Output PCM 녹음용 어큐뮬레이터 (Gemini → 이어폰 방향)
+  const wavAccRef = useRef<WavAccumulator | null>(null);
+  // Input PCM 녹음용 어큐뮬레이터 (마이크 → Gemini 방향)
+  const wavInputAccRef = useRef<WavAccumulator | null>(null);
 
   const [state, setState] = useState<GeminiLiveState>('disconnected');
   const [error, setError] = useState<string | null>(null);
@@ -187,6 +202,10 @@ export function useGeminiLive() {
   const scheduleAudioChunk = useCallback((base64: string) => {
     const float32 = base64PcmToFloat32(base64);
     if (float32.length === 0) return;
+
+    // ── WAV 누적 (출력 스트림 레코딩) ─────────────────────────
+    // wavExportEnabled 상태와 무관하게 어큐뮬레이터가 살아있으면 항상 누적
+    wavAccRef.current?.push(float32);
 
     // ── 이어폰 AudioContext ──────────────────────────────────
     // muteLocalOutput: true 인 세션(내 마이크 전용)은 이어폰 출력 차단
@@ -241,7 +260,7 @@ export function useGeminiLive() {
         const { modelTurn, turnComplete, interrupted } = msg.serverContent;
 
         // 응답 중단 (새 입력으로 덮어씌워짐)
-        // 재생 타임라인 리셋 + AEC 게이트 즉시 해제 + 텍스트 버퍼 초기화
+        // 재생 타임라인 리셋 + AEC 게이트 즉시 해제 + 텍스트/WAV 버퍼 초기화
         if (interrupted) {
           console.log('[GeminiLive] interrupted — 재생 타임라인 리셋');
           if (ctxRef.current) nextPlayTimeRef.current = ctxRef.current.currentTime;
@@ -249,6 +268,8 @@ export function useGeminiLive() {
           muteUntilRef.current = 0;
           textAccumulatorRef.current = '';
           subtitleAccRef.current = '';
+          // WAV 버퍼 드롭 (중단된 턴 — 불완전한 오디오)
+          wavAccRef.current?.reset();
           return;
         }
 
@@ -293,6 +314,16 @@ export function useGeminiLive() {
               muteUntilRef.current = 0;
             }
           }
+
+          // ── WAV 자동 저장 (출력) ─────────────────────────────
+          // turnComplete = 1개의 완전한 통역 발화 단위 → 바로 덤프
+          if (wavExportEnabledRef.current && wavAccRef.current && !wavAccRef.current.isEmpty) {
+            // 비동기 flush (UI 블로킹 없음)
+            wavAccRef.current.flush({ minSamples: 2400 }).catch((e) =>
+              console.warn('[GeminiLive] WAV flush 실패:', e)
+            );
+          }
+
           console.log('[GeminiLive] turnComplete');
         }
       }
@@ -337,12 +368,13 @@ export function useGeminiLive() {
       let didError = false;
 
       ws.onopen = () => {
+        reconnectCountRef.current = 0; // 연결 성공 → 재시도 카운터 초기화
         // ── Setup 메시지: 세션 초기화 ─────────────────────────
         // response_modalities: ['AUDIO'] → 텍스트 없이 음성으로만 응답
         // system_instruction → 통역사 역할 및 언어 지시
         const setupMsg = {
           setup: {
-            model: config.model ?? 'models/gemini-2.5-flash-native-audio-preview-12-2025',
+            model: config.model ?? 'models/gemini-3.1-flash-live-preview',
             generation_config: {
               response_modalities: ['AUDIO'],
               speech_config: {
@@ -362,6 +394,17 @@ export function useGeminiLive() {
         };
         ws.send(JSON.stringify(setupMsg));
         console.log('[GeminiLive] 연결됨 — setup 전송 완료');
+
+        // keepalive: 10초마다 빈 텍스트 턴 전송 → 서버 idle timeout 방지
+        if (keepaliveTimerRef.current) clearInterval(keepaliveTimerRef.current);
+        keepaliveTimerRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            // clientContent 표준 keepalive 패턴 (새 API 포맷 호환)
+            ws.send(JSON.stringify({
+              clientContent: { turns: [], turnComplete: false },
+            }));
+          }
+        }, 15000);
       };
 
       ws.onmessage = (ev) => {
@@ -383,9 +426,34 @@ export function useGeminiLive() {
 
       ws.onclose = (ev) => {
         wsRef.current = null;
+        // keepalive 중단
+        if (keepaliveTimerRef.current) {
+          clearInterval(keepaliveTimerRef.current);
+          keepaliveTimerRef.current = null;
+        }
         if (!didError) {
-          setState('disconnected');
           console.log('[GeminiLive] 연결 종료:', ev.code, ev.reason || '정상 종료');
+        }
+        if (intentionalDisconnectRef.current) {
+          // 사용자가 직접 disconnect() 호출 → 재연결 안 함
+          intentionalDisconnectRef.current = false;
+          setState('disconnected');
+          return;
+        }
+        // 예상치 못한 연결 끊김 → 자동 재연결 (최대 3회)
+        const MAX_RETRIES = 3;
+        if (reconnectCountRef.current < MAX_RETRIES && configRef.current) {
+          const delay = Math.pow(2, reconnectCountRef.current) * 1000; // 1s, 2s, 4s
+          reconnectCountRef.current += 1;
+          console.log(`[GeminiLive] ${delay/1000}초 후 자동 재연결 시도 (${reconnectCountRef.current}/${MAX_RETRIES})`);
+          reconnectTimerRef.current = setTimeout(() => {
+            if (configRef.current && !intentionalDisconnectRef.current) {
+              connect(configRef.current);
+            }
+          }, delay);
+        } else {
+          reconnectCountRef.current = 0;
+          setState('disconnected');
         }
       };
     },
@@ -400,19 +468,26 @@ export function useGeminiLive() {
   //     onSpeechEnd: (chunk) => sendAudioChunk(chunk.base64),
   //   }, { muteUntilRef })
   const sendAudioChunk = useCallback((base64: string, inputSampleRate?: number) => {
+    // ── WAV 누적 (입력 스트림 — 마이크 방향) ──────────────────
+    if (wavExportEnabledRef.current && wavInputAccRef.current) {
+      // base64 → Int16 LE 바이트 직접 누적 (재디코딩 비용 제로)
+      const binaryStr = atob(base64);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+      wavInputAccRef.current.pushInt16Bytes(bytes);
+    }
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
     const rate = inputSampleRate ?? configRef.current?.inputSampleRate ?? 16000;
+    // 새 API 포맷: realtimeInput.audio (mediaChunks deprecated in gemini-3.1+)
     ws.send(
       JSON.stringify({
         realtimeInput: {
-          mediaChunks: [
-            {
-              mimeType: `audio/pcm;rate=${rate}`,
-              data: base64,
-            },
-          ],
+          audio: {
+            data: base64,
+            mimeType: `audio/pcm;rate=${rate}`,
+          },
         },
       })
     );
@@ -430,6 +505,50 @@ export function useGeminiLive() {
         },
       })
     );
+  }, []);
+
+  // ── WAV Export 제어 ──────────────────────────────────────────
+  /**
+   * WAV 자동 저장 활성화
+   * 이후 수신되는 모든 Gemini 출력 PCM을 turnComplete 단위로 WAV 파일로 덤프
+   *
+   * @param opts.outputPrefix   출력(통역 음성) 파일명 접두사 (기본: 'TalkSync_통역')
+   * @param opts.inputPrefix    입력(내 음성) 파일명 접두사 (기본: 'TalkSync_입력')
+   *                            null 전달 시 입력 녹음 비활성화
+   * @param opts.inputSampleRate 입력 스트림 샘플레이트 (기본: 16000)
+   */
+  const enableWavExport = useCallback((
+    opts?: {
+      outputPrefix?: string;
+      inputPrefix?: string | null;
+      inputSampleRate?: number;
+    }
+  ) => {
+    wavExportEnabledRef.current = true;
+    wavAccRef.current = new WavAccumulator(
+      { sampleRate: OUTPUT_SAMPLE_RATE, numChannels: 1, bitsPerSample: 16 },
+      opts?.outputPrefix ?? 'TalkSync_통역'
+    );
+    if (opts?.inputPrefix !== null) {
+      wavInputAccRef.current = new WavAccumulator(
+        { sampleRate: opts?.inputSampleRate ?? 16000, numChannels: 1, bitsPerSample: 16 },
+        opts?.inputPrefix ?? 'TalkSync_입력'
+      );
+    }
+    console.log('[GeminiLive] WAV Export 활성화 — 턴 완료 시 자동 저장');
+  }, []);
+
+  /**
+   * WAV 자동 저장 비활성화 + 현재 버퍼 flush (미처리 오디오 마저 저장)
+   */
+  const disableWavExport = useCallback(async () => {
+    wavExportEnabledRef.current = false;
+    const flushOut   = wavAccRef.current?.flush({ minSamples: 2400 });
+    const flushIn    = wavInputAccRef.current?.flush({ minSamples: 1600 });
+    await Promise.allSettled([flushOut, flushIn].filter(Boolean));
+    wavAccRef.current      = null;
+    wavInputAccRef.current = null;
+    console.log('[GeminiLive] WAV Export 비활성화');
   }, []);
 
   // ── 커스텀 TTS 모드 제어 ─────────────────────────────────────
@@ -462,12 +581,27 @@ export function useGeminiLive() {
 
   // ── 연결 종료 ────────────────────────────────────────────────
   const disconnect = useCallback(() => {
+    intentionalDisconnectRef.current = true; // 의도적 종료 표시
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (keepaliveTimerRef.current) {
+      clearInterval(keepaliveTimerRef.current);
+      keepaliveTimerRef.current = null;
+    }
     wsRef.current?.close(1000, 'user disconnect');
     wsRef.current = null;
     nextPlayTimeRef.current = 0;
     nextVbPlayTimeRef.current = 0;
     muteUntilRef.current = 0;
     subtitleAccRef.current = '';
+    reconnectCountRef.current = 0;
+    // 세션 종료 시 남은 버퍼 최종 flush
+    if (wavExportEnabledRef.current) {
+      wavAccRef.current?.flush({ minSamples: 2400 }).catch(() => {});
+      wavInputAccRef.current?.flush({ minSamples: 1600 }).catch(() => {});
+    }
     setState('disconnected');
   }, []);
 
@@ -479,6 +613,9 @@ export function useGeminiLive() {
   // ── 언마운트 정리 ────────────────────────────────────────────
   useEffect(() => {
     return () => {
+      intentionalDisconnectRef.current = true;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (keepaliveTimerRef.current) clearInterval(keepaliveTimerRef.current);
       wsRef.current?.close(1000, 'unmount');
       ctxRef.current?.close();
       vbCtxRef.current?.close();
@@ -529,5 +666,23 @@ export function useGeminiLive() {
     setMonitorOutput: (enabled: boolean) => {
       if (configRef.current) configRef.current.muteLocalOutput = !enabled;
     },
+    /**
+     * WAV 자동 저장 활성화
+     * Gemini 출력 PCM을 turnComplete 단위로 물리 WAV 파일 저장
+     *
+     * 사용 예:
+     *   geminiLive.enableWavExport()          // 기본 — 통역 음성만
+     *   geminiLive.enableWavExport({          // 고급 — 입출력 동시 캡처
+     *     outputPrefix: 'TalkSync_통역',
+     *     inputPrefix:  'TalkSync_입력',
+     *     inputSampleRate: 16000,
+     *   });
+     */
+    enableWavExport,
+    /**
+     * WAV 자동 저장 비활성화 + 잔여 버퍼 최종 flush
+     * disconnect() 전에 호출하거나, disconnect()가 자동 처리
+     */
+    disableWavExport,
   };
 }

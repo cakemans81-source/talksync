@@ -158,8 +158,8 @@ export function useTranslationPipeline() {
         if (source === 'mic') {
           // 내 번역음 → VB-Cable → Discord 상대방 마이크로 전달
           await audioRouter.routeMP3ToVirtualMic(audioBuffer);
-          // TTS 완료 후 추가 5초 뮤트 — STT 에코 차단
-          sysMuteUntilRef.current = Date.now() + 5000;
+          // TTS 완료 후 추가 2초 뮤트 — STT 에코 차단 (5초→2초)
+          sysMuteUntilRef.current = Date.now() + 2000;
         } else {
           // 상대방 번역음 → 이어폰으로 출력 (setSinkId 적용)
           await audioRouter.playBlobToEarphone(new Blob([audioBuffer], { type: 'audio/mp3' }));
@@ -251,6 +251,12 @@ export function useTranslationPipeline() {
             // '인식 중...'은 UI 표시용 — pendingMicRef(번역 대기 텍스트)에는 저장 안 함
             if (text && text !== '인식 중...') pendingMicRef.current = text;
             else if (!text) pendingMicRef.current = ''; // 빈 문자열로 클리어
+          },
+          (text) => {
+            setInterimSys(text);
+            // sys interim도 mic과 동일한 패턴으로 pendingSysRef 업데이트
+            if (text && text !== '인식 중...') pendingSysRef.current = text;
+            else if (!text) pendingSysRef.current = ''; // 빈 문자열로 클리어
           },
           (src, err) => setError(`STT 오류(${src}): ${err}`)
         );

@@ -17,6 +17,7 @@ import {
   synthesizeEdgeTTS, synthesizeElevenLabsTTS, synthesizeGeminiTTS, defaultEdgeVoiceForLang,
   type TTSEngine, type ElevenLabsVoice,
 } from '@/lib/tts';
+import { VAD_TRANSLATION_PRESETS } from '@/lib/systemAudioCapture';
 
 // ── Gemini 출력 후처리: 타겟 언어 텍스트만 추출 ──────────
 function extractTranslation(raw: string, targetLangCode: string): string {
@@ -217,13 +218,13 @@ function VirtualCableGuard({ onDetected }: { onDetected: () => void }) {
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-blue-900">Windows — TalkSync Virtual Audio Cable</p>
               <p className="text-xs text-blue-600 mt-1 leading-relaxed">
-                TalkSync 드라이버 설치 → 재부팅 (또는 VB-CABLE 사용 가능)
+                TalkSync 드라이버 설치 → 재부팅 (또는 TalkSync Virtual Audio Cable 사용 가능)
               </p>
               <button
                 onClick={() => openExternal('https://vb-audio.com/Cable/')}
                 className="inline-flex items-center gap-1.5 mt-2 text-xs font-semibold text-blue-700 bg-blue-100 hover:bg-blue-200 px-3 py-1.5 rounded-xl transition-colors"
               >
-                다운로드 →
+                TalkSync 드라이버 다운로드 →
               </button>
             </div>
           </div>
@@ -711,13 +712,10 @@ export default function StudioPage() {
   const levelRafRef = useRef<number>(0);
   const [cableDetected, setCableDetected] = useState(false);
 
-  // ── VAD 반응 속도 프리셋 ─────────────────────
+  // ── VAD 반응 속도 프리셋 (통번역 최적화 — systemAudioCapture.ts 정의)
+  // rmsTimeoutMs = redemptionMs + 200ms 동적 공식으로 폴백 하드코딩 문제 해결
   type VADSpeed = 'fast' | 'balanced' | 'accurate';
-  const VAD_SPEED_PRESETS: Record<VADSpeed, { redemptionMs: number; negativeSpeechThreshold: number; minSpeechMs: number }> = {
-    fast:     { redemptionMs: 300,  negativeSpeechThreshold: 0.50, minSpeechMs: 100 },
-    balanced: { redemptionMs: 400,  negativeSpeechThreshold: 0.45, minSpeechMs: 150 },
-    accurate: { redemptionMs: 800,  negativeSpeechThreshold: 0.35, minSpeechMs: 250 },
-  };
+  const VAD_SPEED_PRESETS = VAD_TRANSLATION_PRESETS;
   const [vadSpeed, setVadSpeed] = useState<VADSpeed>('balanced');
 
   // ── Gemini Live V2 파이프라인 상태 ────────────
@@ -730,6 +728,8 @@ export default function StudioPage() {
   const [isSpeakingLive, setIsSpeakingLive] = useState(false);
   // VAD 정리 함수 ref
   const stopLiveVADRef = useRef<(() => void) | null>(null);
+  // 시스템 오디오(상대방 음성) VAD 정리 함수 ref
+  const stopLiveSysVADRef = useRef<(() => void) | null>(null);
   // 'ready' 상태가 되면 VAD를 한 번만 시작하기 위한 플래그
   const liveStartedRef = useRef(false);
   // 최초 'ready' 도달 여부 — setLiveActive(true) 리렌더링 시 state='disconnected'에서
@@ -1074,6 +1074,29 @@ export default function StudioPage() {
           setLiveToast(`VAD 시작 실패: ${err.message}`);
           handleLiveStop();
         });
+
+      // 두 번째 VAD — 시스템 오디오(상대방 음성) 대상
+      // muteUntilRef로 Gemini 출력 중 에코 섹션 자동 차단
+      if (!stopLiveSysVADRef.current && pipeline.isSysActive) {
+        stopLiveSysVADRef.current = () => {}; // race condition 방지
+        pipeline.startVADWeb(
+          'sys',
+          {
+            onSpeechStart: () => {},
+            onSpeechEnd: (chunk) => {
+              geminiLive.sendAudioChunk(chunk.base64);
+            },
+            onVADFallback: (reason) =>
+              console.warn(`[LiveSysVAD] 폴백: ${reason}`),
+          },
+          { muteUntilRef: geminiLive.muteUntilRef, ...VAD_SPEED_PRESETS[vadSpeed] }
+        )
+          .then((cleanup) => { stopLiveSysVADRef.current = cleanup; })
+          .catch((err: Error) => {
+            stopLiveSysVADRef.current = null;
+            console.warn('[LiveStart] 시스템 VAD 시작 실패:', err.message);
+          });
+      }
     }
 
     if (geminiLive.state === 'error') {
@@ -1092,6 +1115,8 @@ export default function StudioPage() {
       setLiveActive(false);
       stopLiveVADRef.current?.();
       stopLiveVADRef.current = null;
+      stopLiveSysVADRef.current?.();
+      stopLiveSysVADRef.current = null;
     }
     // pipeline.startVADWeb / geminiLive.sendAudioChunk 는 안정적인 useCallback refs
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1122,6 +1147,15 @@ export default function StudioPage() {
         const base = err instanceof Error ? err.message : '마이크 캡처 실패';
         setLiveToast(`${base} — 마이크 장치를 확인해 주세요`);
         return;
+      }
+    }
+
+    // 시스템 오디오 캐처 (상대방 음성 번역용) — 실패해도 마이크 번역은 동작
+    if (!pipeline.isSysActive) {
+      try {
+        await pipeline.captureSystemAudio();
+      } catch (e) {
+        console.warn('[LiveStart] 시스템 오디오 캐처 실패 (상대방 번역 비활성화):', e);
       }
     }
 
@@ -1169,6 +1203,8 @@ export default function StudioPage() {
     liveWasReadyRef.current = false;
     stopLiveVADRef.current?.();
     stopLiveVADRef.current = null;
+    stopLiveSysVADRef.current?.();
+    stopLiveSysVADRef.current = null;
     geminiLive.disconnect();
     geminiLive.disableCustomTTS(); // 커스텀 TTS 모드 초기화
     setLiveActive(false);

@@ -36,4 +36,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('audio:enable-cable-routing'),
   disableCableRouting: (): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke('audio:disable-cable-routing'),
+
+  // WAV 파일 저장 (wavExporter.ts → main 프로세스 → Downloads/TalkSync/)
+  // ArrayBuffer 직접 전달 — Uint8Array/Buffer로 자동 변환됨
+  saveWav: (buffer: ArrayBuffer, filename: string): Promise<{ ok: boolean; path?: string; reason?: string }> =>
+    ipcRenderer.invoke('audio:save-wav', buffer, filename),
 });

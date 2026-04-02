@@ -76,7 +76,7 @@ export function useAutoAudioSetup(): AutoAudioResult {
         inputs.find((d) => isVirtual(d.label) && d.label.toLowerCase().includes('output')) ??
         inputs.find((d) => isVirtual(d.label));
 
-      // ── 화상회의 송신 — CABLE-A Input 우선 (non-B), 없으면 임의 virtual audiooutput ──
+      // ── 화상회의 송신 — TalkSync Tx 우선 (non-B), 없으면 임의 virtual audiooutput ──
       // 우선순위: 1) input 포함 + non-B  2) input 포함  3) 임의 virtual
       const virtualOutput =
         outputs.find((d) => isVirtual(d.label) && d.label.toLowerCase().includes('input') && !isCableB(d.label)) ??

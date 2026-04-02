@@ -256,7 +256,7 @@ export class GeminiSTTManager {
   private sysRecorder: MediaRecorder | null = null;
   private micTimer: ReturnType<typeof setTimeout> | null = null;
   private sysTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly CHUNK_MS = 3000; // 3초마다 전사
+  private readonly CHUNK_MS = 1500; // 1.5초마다 전사 (3초→1.5초 지연 절감)
 
   constructor(
     private readonly micStream: MediaStream | null,
@@ -267,6 +267,7 @@ export class GeminiSTTManager {
     private readonly onMicFinal: (text: string) => void,
     private readonly onSysFinal: (text: string) => void,
     private readonly onMicInterim?: (text: string) => void,
+    private readonly onSysInterim?: (text: string) => void,
     private readonly onError?: (source: 'mic' | 'sys', error: string) => void
   ) {}
 
@@ -323,6 +324,7 @@ export class GeminiSTTManager {
           `(기본 장치가 TalkSync Virtual Audio Cable일 수 있습니다)`
         );
         if (source === 'mic') this.onMicInterim?.(''); // 인식 중... 클리어
+        else this.onSysInterim?.(''); // sys 인식 중... 클리어
         if (this.isRunning) this.scheduleCapture(source);
         return;
       }
@@ -335,12 +337,14 @@ export class GeminiSTTManager {
         const hasSpeech = await analyzeVAD(arrayBuffer);
         if (!hasSpeech) {
           if (source === 'mic') this.onMicInterim?.(''); // 침묵 → 인식 중... 클리어
+          else this.onSysInterim?.(''); // 침묵 → sys 인식 중... 클리어
           if (this.isRunning) this.scheduleCapture(source);
           return;
         }
 
         // VAD 통과 → 이제 실제 API 전송 중임을 표시
         if (source === 'mic') this.onMicInterim?.('인식 중...');
+        else this.onSysInterim?.('인식 중...');
         console.log(`[GeminiSTT] ${source} VAD 통과 → API 전송`);
 
         const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));

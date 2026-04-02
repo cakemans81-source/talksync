@@ -282,6 +282,26 @@ app.on('open-url', (event, url) => {
   mainWindow?.webContents.send('oauth-callback', url);
 });
 
+// ── WAV 파일 저장 IPC ─────────────────────────────────────────────
+// 렌더러(wavExporter.ts)에서 ArrayBuffer + 파일명을 전달하면 Downloads/TalkSync/ 에 저장
+ipcMain.handle('audio:save-wav', async (_event, buffer: ArrayBuffer, filename: string): Promise<{ ok: boolean; path?: string; reason?: string }> => {
+  try {
+    const downloadsDir = path.join(app.getPath('downloads'), 'TalkSync');
+    if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir, { recursive: true });
+
+    // 파일명에서 경로 트래버설 문자 제거 (보안)
+    const safeName = path.basename(filename).replace(/[/\\:*?"<>|]/g, '_');
+    const filePath  = path.join(downloadsDir, safeName);
+
+    fs.writeFileSync(filePath, Buffer.from(buffer));
+    console.log(`[WavExporter] 저장 완료 → ${filePath}`);
+    return { ok: true, path: filePath };
+  } catch (e) {
+    console.error('[audio:save-wav]', e);
+    return { ok: false, reason: String(e) };
+  }
+});
+
 // ── Windows SAPI TTS: 텍스트 → WAV 버퍼 ─────────────────────────
 // Web Speech Synthesis는 AudioContext로 캡처 불가 → 메인 프로세스에서 직접 생성
 ipcMain.handle('synthesize-tts', async (_event, text: string, langCode: string): Promise<Buffer | null> => {
