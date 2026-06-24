@@ -155,6 +155,15 @@ export function useGeminiLive() {
   // keepalive ping 타이머
   const keepaliveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const earphoneSinkReadyRef = useRef<boolean>(true);
+
+  // 가상 장치 감지 유틸리티
+  const isVirtualDevice = useCallback((label: string): boolean => {
+    const l = label.toLowerCase();
+    const virtualKeywords = ['cable', 'virtual', 'blackhole', 'voicemeeter', 'soundflower', 'vb-audio'];
+    return virtualKeywords.some((kw) => l.includes(kw));
+  }, []);
+
   // ── 자막 추출 Refs ────────────────────────────────────────
   // 모드(초저지연/프리미엄)와 무관하게 part.text를 수집 → turnComplete 시 콜백 실행
   const subtitleAccRef = useRef<string>('');
@@ -185,16 +194,53 @@ export function useGeminiLive() {
     }
     if (ctxRef.current.state === 'suspended') await ctxRef.current.resume();
 
-    if (outputDeviceId && typeof ctxRef.current.setSinkId === 'function') {
+    earphoneSinkReadyRef.current = true;
+
+    let targetSinkId = outputDeviceId;
+
+    // 만약 outputDeviceId가 'default'인 경우 물리 장치로 자동 매핑 시도
+    if (targetSinkId === 'default' || !targetSinkId) {
       try {
-        await ctxRef.current.setSinkId(outputDeviceId);
-        console.log('[GeminiLive] 출력 장치 →', outputDeviceId);
+        const all = await navigator.mediaDevices.enumerateDevices();
+        const outputs = all.filter((d) => d.kind === 'audiooutput');
+        const physicalOutput = outputs.find((d) => d.deviceId !== 'default' && !isVirtualDevice(d.label));
+        if (physicalOutput) {
+          targetSinkId = physicalOutput.deviceId;
+          console.log('[GeminiLive] outputDeviceId가 default이므로 물리 장치 자동 대체:', physicalOutput.label);
+        } else {
+          console.error('[GeminiLive] [누수 방쇄] 물리 출력 장치를 찾을 수 없어 이어폰 출력을 차단합니다.');
+          earphoneSinkReadyRef.current = false;
+        }
       } catch (e) {
-        console.warn('[GeminiLive] setSinkId 실패 (Chrome 110+ 필요):', e);
+        console.error('[GeminiLive] 장치 스캔 오류 및 출력 차단:', e);
+        earphoneSinkReadyRef.current = false;
+      }
+    } else {
+      // 지정된 장치가 가상 디바이스인지 검증하여 차단
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices();
+        const outputs = all.filter((d) => d.kind === 'audiooutput');
+        const currentDevice = outputs.find((d) => d.deviceId === targetSinkId);
+        if (currentDevice && isVirtualDevice(currentDevice.label)) {
+          console.error('[GeminiLive] [누수 방쇄] 가상 장치로의 이어폰 출력이 감지되어 차단합니다:', currentDevice.label);
+          earphoneSinkReadyRef.current = false;
+        }
+      } catch (e) {
+        console.error('[GeminiLive] 장치 검증 오류:', e);
+      }
+    }
+
+    if (earphoneSinkReadyRef.current && targetSinkId && typeof ctxRef.current.setSinkId === 'function') {
+      try {
+        await ctxRef.current.setSinkId(targetSinkId);
+        console.log('[GeminiLive] 출력 장치 →', targetSinkId);
+      } catch (e) {
+        console.error('[GeminiLive] setSinkId 실패로 인해 재생이 차단되었습니다 (누수 방쇄):', e);
+        earphoneSinkReadyRef.current = false;
       }
     }
     return ctxRef.current;
-  }, []);
+  }, [isVirtualDevice]);
 
   // ── PCM 청크 스케줄 재생 ─────────────────────────────────────
   // AudioContext 타임라인에 순서대로 예약 → 네트워크 지터와 무관하게 끊김 없이 재생
@@ -210,7 +256,7 @@ export function useGeminiLive() {
     // ── 이어폰 AudioContext ──────────────────────────────────
     // muteLocalOutput: true 인 세션(내 마이크 전용)은 이어폰 출력 차단
     const ctx = ctxRef.current;
-    if (ctx && ctx.state !== 'closed' && !configRef.current?.muteLocalOutput) {
+    if (ctx && ctx.state !== 'closed' && !configRef.current?.muteLocalOutput && earphoneSinkReadyRef.current) {
       const audioBuffer = ctx.createBuffer(1, float32.length, OUTPUT_SAMPLE_RATE);
       audioBuffer.copyToChannel(float32 as Float32Array<ArrayBuffer>, 0);
       const source = ctx.createBufferSource();

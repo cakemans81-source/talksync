@@ -237,22 +237,64 @@ class AudioRouter {
   }
 
   // ── Blob → 이어폰 (setSinkId 적용) ──────────
+  private isVirtualDevice(label: string): boolean {
+    const l = label.toLowerCase();
+    const virtualKeywords = ['cable', 'virtual', 'blackhole', 'voicemeeter', 'soundflower', 'vb-audio'];
+    return virtualKeywords.some((kw) => l.includes(kw));
+  }
+
+  // ── Blob → 이어폰 (setSinkId 적용) ──────────
   async playBlobToEarphone(blob: Blob): Promise<void> {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
 
-    console.log('[AudioRouter] Earphone Target Device ID:', this.earphoneDeviceId);
+    let targetSinkId = this.earphoneDeviceId;
+    console.log('[AudioRouter] Earphone Target Device ID:', targetSinkId);
+
+    // 1. 만약 earphoneDeviceId가 'default'인 경우 시스템 기본값인 가상 마이크(VAC)로의 누수 방어
+    if (targetSinkId === 'default') {
+      try {
+        const { outputs } = await AudioRouter.enumerateDevices();
+        const physicalOutput = outputs.find((d) => d.deviceId !== 'default' && !this.isVirtualDevice(d.label));
+        if (physicalOutput) {
+          targetSinkId = physicalOutput.deviceId;
+          console.log('[AudioRouter] earphoneDeviceId가 default이므로 물리 장치 자동 대체 바인딩:', physicalOutput.label);
+        } else {
+          URL.revokeObjectURL(url);
+          throw new Error('물리 스피커/이어폰 장치를 찾을 수 없어 재생을 거부합니다. (누수 방어)');
+        }
+      } catch (e) {
+        URL.revokeObjectURL(url);
+        throw new Error(`디바이스 자동 감지 실패 및 재생 차단: ${(e as Error).message}`);
+      }
+    } else {
+      // 2. 지정된 장치가 가상 디바이스인지 검증하여 차단
+      try {
+        const { outputs } = await AudioRouter.enumerateDevices();
+        const currentDevice = outputs.find((d) => d.deviceId === targetSinkId);
+        if (currentDevice && this.isVirtualDevice(currentDevice.label)) {
+          URL.revokeObjectURL(url);
+          throw new Error(`가상 장치로의 이어폰 출력 재생이 거부되었습니다: ${currentDevice.label}`);
+        }
+      } catch (e) {
+        URL.revokeObjectURL(url);
+        throw e;
+      }
+    }
 
     try {
       const audioWithSink = audio as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
       if (typeof audioWithSink.setSinkId === 'function') {
-        await audioWithSink.setSinkId(this.earphoneDeviceId);
-        console.log('[AudioRouter] setSinkId(earphone) 성공:', this.earphoneDeviceId);
+        await audioWithSink.setSinkId(targetSinkId);
+        console.log('[AudioRouter] setSinkId(earphone) 성공:', targetSinkId);
       } else {
-        console.error('[AudioRouter] setSinkId 미지원 — Chrome 71+ 필요');
+        URL.revokeObjectURL(url);
+        throw new Error('setSinkId 미지원 브라우저 환경입니다.');
       }
     } catch (e) {
-      console.error('[AudioRouter] setSinkId(earphone) 실패:', e, '| deviceId:', this.earphoneDeviceId);
+      URL.revokeObjectURL(url);
+      console.error('[AudioRouter] setSinkId(earphone) 실패로 재생이 유출 차단되었습니다:', e);
+      throw e;
     }
 
     await audio.play();

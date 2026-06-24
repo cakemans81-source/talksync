@@ -162,7 +162,13 @@ export function useTranslationPipeline() {
           sysMuteUntilRef.current = Date.now() + 2000;
         } else {
           // 상대방 번역음 → 이어폰으로 출력 (setSinkId 적용)
-          await audioRouter.playBlobToEarphone(new Blob([audioBuffer], { type: 'audio/mp3' }));
+          try {
+            await audioRouter.playBlobToEarphone(new Blob([audioBuffer], { type: 'audio/mp3' }));
+          } catch (playErr) {
+            const msg = `이어폰 출력 바인딩 실패로 인해 음성 재생이 취소되었습니다: ${(playErr as Error).message}`;
+            console.error('[Pipeline]', msg);
+            setTtsWarning(msg);
+          }
         }
       } else {
         // 3차(최종): 브라우저 내장 TTS — VB-Cable 라우팅 불가, 이어폰만 출력
