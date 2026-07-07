@@ -89,7 +89,14 @@
         }
       ],
       "icon": "build/icon.ico",
-      "artifactName": "TalkSync-Setup-${version}.exe"
+      "artifactName": "TalkSync-Setup-${version}.exe",
+      "signtoolOptions": {
+        "sign": "./scripts/electron-builder-sign-win.cjs",
+        "signingHashAlgorithms": [
+          "sha256"
+        ],
+        "rfc3161TimeStampServer": "http://timestamp.digicert.com"
+      }
     },
     "nsis": {
       "oneClick": true,

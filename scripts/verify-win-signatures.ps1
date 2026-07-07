@@ -1,6 +1,9 @@
 param(
   [Parameter(Mandatory = $false)]
-  [string]$DistDir = "dist-electron"
+  [string]$DistDir = "dist-electron",
+
+  [Parameter(Mandatory = $false)]
+  [string]$InstalledDir
 )
 
 Set-StrictMode -Version Latest
@@ -107,3 +110,43 @@ if ($failures -gt 0) {
 }
 
 Write-Host "PASS summary: all $($targets.Count) target(s) are validly signed." -ForegroundColor Green
+
+if (-not [string]::IsNullOrWhiteSpace($InstalledDir)) {
+  $installedPath = Resolve-RepoPath $InstalledDir
+  if (-not (Test-Path -LiteralPath $installedPath -PathType Container)) {
+    Write-Host "FAIL installed directory not found: $installedPath" -ForegroundColor Red
+    exit 1
+  }
+
+  $installedExes = @(Get-ChildItem -LiteralPath $installedPath -Recurse -File -Filter "*.exe" -ErrorAction SilentlyContinue |
+    Sort-Object FullName)
+  if ($installedExes.Count -eq 0) {
+    Write-Host "FAIL no installed EXE files found under $installedPath" -ForegroundColor Red
+    exit 1
+  }
+
+  $installedFailures = 0
+  Write-Host "TalkSync installed-path signature verification"
+  Write-Host "InstalledDir: $installedPath"
+  Write-Host "Targets: $($installedExes.Count)"
+
+  foreach ($exe in $installedExes) {
+    $signature = Get-AuthenticodeSignature -FilePath $exe.FullName
+    if ($signature.Status -eq "Valid") {
+      Write-Host "PASS $($exe.FullName)" -ForegroundColor Green
+      continue
+    }
+
+    $installedFailures += 1
+    Write-Host "FAIL $($exe.FullName)" -ForegroundColor Red
+    Write-Host "     Status: $($signature.Status)"
+    Write-Host "     Message: $($signature.StatusMessage)"
+  }
+
+  if ($installedFailures -gt 0) {
+    Write-Host "FAIL installed summary: $installedFailures of $($installedExes.Count) target(s) are not validly signed." -ForegroundColor Red
+    exit 1
+  }
+
+  Write-Host "PASS installed summary: all $($installedExes.Count) target(s) are validly signed." -ForegroundColor Green
+}

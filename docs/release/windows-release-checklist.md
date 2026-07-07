@@ -46,6 +46,8 @@ npm run build:win-release -- -- `
   warning, not a release blocker.
 - Every `dist-electron\TalkSync-Setup*.exe` installer intended for upload is
   signed and valid.
+- After installing the setup executable, every installed `.exe` is signed and
+  valid, including `Uninstall TalkSync.exe`.
 - Timestamp information is present.
 - No thumbprint or PIN was written into committed files.
 
@@ -55,12 +57,22 @@ Run:
 npm run verify:win-signatures
 ```
 
+After installation, run:
+
+```powershell
+.\scripts\verify-win-signatures.ps1 `
+  -DistDir "dist-electron" `
+  -InstalledDir "$env:LOCALAPPDATA\Programs\TalkSync"
+```
+
 ## Install Test
 
 - Test on a clean Windows user profile or clean Windows VM.
 - Install with the generated NSIS setup EXE.
 - Confirm Windows shows the expected publisher.
 - Launch TalkSync from the Start Menu shortcut.
+- Confirm installed `TalkSync.exe`, `resources\elevate.exe` if present, and
+  `Uninstall TalkSync.exe` are Authenticode `Valid`.
 - Confirm the `talksync://` OAuth protocol still opens the app.
 - Confirm microphone permission flow still works.
 - Confirm the app can detect the expected virtual audio device.
