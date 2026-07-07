@@ -19,6 +19,9 @@
     "build:app": "cross-env ELECTRON_BUILD=true next build && npm run electron:compile",
     "package": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --publish never",
     "package:all": "npm run build:app && npm run package",
+    "sign:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-win.ps1",
+    "verify:win-signatures": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-win-signatures.ps1",
+    "build:win-release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win-release.ps1",
     "deploy": "git add -A && git commit -m \"deploy: $(date '+%Y-%m-%d %H:%M')\" && git push origin main"
   },
   "dependencies": {
