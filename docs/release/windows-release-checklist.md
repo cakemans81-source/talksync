@@ -39,7 +39,11 @@ npm run build:win-release -- -- `
 ## Signing Checks
 
 - `dist-electron\win-unpacked\TalkSync.exe` is signed and valid.
-- `dist-electron\win-unpacked\resources\elevate.exe` is signed and valid.
+- Every `.exe` discovered under `dist-electron\win-unpacked` is signed and
+  valid.
+- `dist-electron\win-unpacked\resources\elevate.exe` is signed and valid if it
+  exists. It may be absent in the current electron-builder output; absence is a
+  warning, not a release blocker.
 - Every `dist-electron\TalkSync-Setup*.exe` installer intended for upload is
   signed and valid.
 - Timestamp information is present.
@@ -72,6 +76,8 @@ npm run verify:win-signatures
 ## Distribution
 
 - Upload only the signed installer.
+- Confirm `dist-electron` was regenerated for this release so stale installers
+  are not uploaded by accident.
 - If publishing `latest.yml` for an updater later, verify its SHA512 matches the
   final signed installer bytes.
 - Do not publish unsigned backup installers.

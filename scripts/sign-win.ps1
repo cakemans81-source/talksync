@@ -132,7 +132,10 @@ foreach ($fileValue in $Files) {
   }
 }
 
-$targetPaths = @($expandedFiles | ForEach-Object { Resolve-TargetPath $_ })
+$targetPaths = @($expandedFiles | ForEach-Object { Resolve-TargetPath $_ } | Sort-Object -Unique)
+if ($targetPaths.Count -eq 0) {
+  Fail "No signing targets were provided."
+}
 
 Write-Host "TalkSync Windows signing"
 Write-Host "Timestamp URL: $TimestampUrl"

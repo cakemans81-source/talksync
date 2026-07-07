@@ -1,9 +1,6 @@
 param(
   [Parameter(Mandatory = $false)]
-  [string]$DistDir = "dist-electron",
-
-  [Parameter(Mandatory = $false)]
-  [switch]$AllowMissingElevate
+  [string]$DistDir = "dist-electron"
 )
 
 Set-StrictMode -Version Latest
@@ -25,20 +22,16 @@ function Resolve-RepoPath([string]$PathValue) {
   return (Join-Path $RepoRoot $PathValue)
 }
 
-function Add-RequiredTarget {
+function Add-Target {
   param(
     [System.Collections.Generic.List[string]]$Targets,
-    [string]$PathValue,
-    [string]$Label
+    [string]$PathValue
   )
 
-  if (-not (Test-Path -LiteralPath $PathValue -PathType Leaf)) {
-    Write-Host "FAIL missing $Label`: $PathValue" -ForegroundColor Red
-    return $false
+  $resolved = (Resolve-Path -LiteralPath $PathValue).Path
+  if (-not $Targets.Contains($resolved)) {
+    $Targets.Add($resolved)
   }
-
-  $Targets.Add((Resolve-Path -LiteralPath $PathValue).Path)
-  return $true
 }
 
 $distPath = Resolve-RepoPath $DistDir
@@ -51,18 +44,27 @@ $targets = [System.Collections.Generic.List[string]]::new()
 $missingRequired = $false
 
 $appExe = Join-Path $distPath "win-unpacked\TalkSync.exe"
-if (-not (Add-RequiredTarget -Targets $targets -PathValue $appExe -Label "app exe")) {
+if (Test-Path -LiteralPath $appExe -PathType Leaf) {
+  Add-Target -Targets $targets -PathValue $appExe
+} else {
+  Write-Host "FAIL missing app exe: $appExe" -ForegroundColor Red
   $missingRequired = $true
 }
 
 $elevateExe = Join-Path $distPath "win-unpacked\resources\elevate.exe"
 if (Test-Path -LiteralPath $elevateExe -PathType Leaf) {
-  $targets.Add((Resolve-Path -LiteralPath $elevateExe).Path)
-} elseif ($AllowMissingElevate) {
-  Write-Host "WARN missing helper exe: $elevateExe" -ForegroundColor Yellow
+  Add-Target -Targets $targets -PathValue $elevateExe
 } else {
-  Write-Host "FAIL missing helper exe: $elevateExe" -ForegroundColor Red
-  $missingRequired = $true
+  Write-Host "WARN missing helper exe: $elevateExe" -ForegroundColor Yellow
+}
+
+$winUnpackedPath = Join-Path $distPath "win-unpacked"
+if (Test-Path -LiteralPath $winUnpackedPath -PathType Container) {
+  $winUnpackedExes = @(Get-ChildItem -LiteralPath $winUnpackedPath -Recurse -File -Filter "*.exe" -ErrorAction SilentlyContinue |
+    Sort-Object FullName)
+  foreach ($exe in $winUnpackedExes) {
+    Add-Target -Targets $targets -PathValue $exe.FullName
+  }
 }
 
 $installers = @(Get-ChildItem -LiteralPath $distPath -File -Filter "TalkSync-Setup*.exe" -ErrorAction SilentlyContinue |
@@ -72,7 +74,7 @@ if ($installers.Count -eq 0) {
   $missingRequired = $true
 } else {
   foreach ($installer in $installers) {
-    $targets.Add($installer.FullName)
+    Add-Target -Targets $targets -PathValue $installer.FullName
   }
 }
 

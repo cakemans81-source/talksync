@@ -51,6 +51,62 @@ function Get-RequiredFile([string]$PathValue, [string]$Label) {
   return (Resolve-Path -LiteralPath $PathValue).Path
 }
 
+function Assert-WorkspaceChildPath([string]$PathValue, [string]$ExpectedName) {
+  $fullPath = [System.IO.Path]::GetFullPath($PathValue)
+  $rootPath = [System.IO.Path]::GetFullPath($RepoRoot)
+  if (-not $fullPath.StartsWith($rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Fail "Refusing to operate outside the repository: $fullPath"
+  }
+
+  if ([System.IO.Path]::GetFileName($fullPath) -ne $ExpectedName) {
+    Fail "Refusing to clean unexpected path: $fullPath"
+  }
+
+  return $fullPath
+}
+
+function Clear-ReleaseOutput {
+  $safeDistDir = Assert-WorkspaceChildPath $DistDir "dist-electron"
+  if (Test-Path -LiteralPath $safeDistDir) {
+    Write-Host "Cleaning release output: $safeDistDir"
+    Remove-Item -LiteralPath $safeDistDir -Recurse -Force
+  }
+}
+
+function Add-UniqueTarget {
+  param(
+    [System.Collections.Generic.List[string]]$Targets,
+    [string]$PathValue
+  )
+
+  $resolved = (Resolve-Path -LiteralPath $PathValue).Path
+  if (-not $Targets.Contains($resolved)) {
+    $Targets.Add($resolved)
+  }
+}
+
+function Get-PrepackagedExeTargets {
+  $targets = [System.Collections.Generic.List[string]]::new()
+  $appExe = Join-Path $PrepackagedDir "TalkSync.exe"
+  $elevateExe = Join-Path $PrepackagedDir "resources\elevate.exe"
+
+  Add-UniqueTarget -Targets $targets -PathValue (Get-RequiredFile $appExe "app exe")
+
+  if (Test-Path -LiteralPath $elevateExe -PathType Leaf) {
+    Add-UniqueTarget -Targets $targets -PathValue $elevateExe
+  } else {
+    Write-Host "WARN optional helper exe not found: $elevateExe" -ForegroundColor Yellow
+  }
+
+  $allExes = @(Get-ChildItem -LiteralPath $PrepackagedDir -Recurse -File -Filter "*.exe" -ErrorAction SilentlyContinue |
+    Sort-Object FullName)
+  foreach ($exe in $allExes) {
+    Add-UniqueTarget -Targets $targets -PathValue $exe.FullName
+  }
+
+  return $targets.ToArray()
+}
+
 function Invoke-SignScript {
   param(
     [string[]]$Targets
@@ -87,6 +143,12 @@ Write-Host ""
 
 Push-Location $RepoRoot
 try {
+  if ($DryRun) {
+    Write-Host "[DRY-RUN] would clean release output: $DistDir"
+  } else {
+    Clear-ReleaseOutput
+  }
+
   Invoke-External "npm" @("run", "build:app")
 
   Invoke-External "npx" @(
@@ -97,19 +159,12 @@ try {
     "never"
   )
 
-  $appExe = Join-Path $PrepackagedDir "TalkSync.exe"
-  $elevateExe = Join-Path $PrepackagedDir "resources\elevate.exe"
-
   if ($DryRun) {
-    Write-Host "[DRY-RUN] would require app exe: $appExe"
-    Write-Host "[DRY-RUN] would require helper exe: $elevateExe"
-    Write-Host "[DRY-RUN] would sign prepackaged executables with scripts/sign-win.ps1"
+    Write-Host "[DRY-RUN] would require app exe: $(Join-Path $PrepackagedDir "TalkSync.exe")"
+    Write-Host "[DRY-RUN] would sign every .exe found under: $PrepackagedDir"
+    Write-Host "[DRY-RUN] would warn, not fail, if optional helper is missing: $(Join-Path $PrepackagedDir "resources\elevate.exe")"
   } else {
-    $prepackagedTargets = @(
-      (Get-RequiredFile $appExe "app exe"),
-      (Get-RequiredFile $elevateExe "helper exe")
-    )
-
+    $prepackagedTargets = @(Get-PrepackagedExeTargets)
     Invoke-SignScript $prepackagedTargets
   }
 

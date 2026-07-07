@@ -11,6 +11,7 @@ a USB token.
   history, CI logs, or release logs.
 - Use SHA-256 file digest and RFC 3161 timestamping.
 - Sign user-executed EXE files before distribution.
+- Sign every `.exe` discovered under `dist-electron\win-unpacked`.
 - Driver signing is out of scope here. `.sys`, `.inf`, and `.cat` files require
   a separate driver-signing process.
 - VB-CABLE bundling, licensing, and installation automation are out of scope.
@@ -28,13 +29,15 @@ npx electron-builder --win --prepackaged dist-electron\win-unpacked --publish ne
 The important Windows artifacts are:
 
 - `dist-electron\win-unpacked\TalkSync.exe`
-- `dist-electron\win-unpacked\resources\elevate.exe`
+- any other `.exe` discovered under `dist-electron\win-unpacked`
+- `dist-electron\win-unpacked\resources\elevate.exe`, if electron-builder emits
+  it for the current NSIS build
 - `dist-electron\TalkSync-Setup-*.exe`
 
 Electron runtime DLLs are not first-pass signing targets in this project. They
 are third-party runtime files produced by Electron/electron-builder. The local
-TalkSync executable, NSIS helper executable, and installer are the primary files
-users execute or Windows reputation systems inspect.
+TalkSync executable, any emitted helper executable, and installer are the primary
+files users execute or Windows reputation systems inspect.
 
 ## Find The Certificate Thumbprint
 
@@ -92,13 +95,18 @@ Then run the release build on the Windows machine with the USB token inserted:
 
 The script performs this order:
 
-1. Build the Next.js export and Electron main/preload output with
+1. Clean `dist-electron` so stale installers cannot be mistaken for the current
+   release.
+2. Build the Next.js export and Electron main/preload output with
    `npm run build:app`.
-2. Create the unpacked Electron app with electron-builder `--dir`.
-3. Sign `TalkSync.exe` and `resources\elevate.exe`.
-4. Generate the NSIS installer from the signed prepackaged app.
-5. Sign the generated `TalkSync-Setup*.exe` installer.
-6. Verify the app, helper, and installer signatures.
+3. Create the unpacked Electron app with electron-builder `--dir`.
+4. Sign required `TalkSync.exe` and every `.exe` found under
+   `dist-electron\win-unpacked`.
+5. Warn, but do not fail, if the optional `resources\elevate.exe` helper is not
+   emitted by the current build.
+6. Generate the NSIS installer from the signed prepackaged app.
+7. Sign the generated `TalkSync-Setup*.exe` installer.
+8. Verify the app, discovered helper executables, and installer signatures.
 
 ## Manual Signing
 
@@ -110,7 +118,6 @@ To sign specific files manually:
   -TimestampUrl "http://timestamp.digicert.com" `
   -Files @(
     "dist-electron\win-unpacked\TalkSync.exe",
-    "dist-electron\win-unpacked\resources\elevate.exe",
     "dist-electron\TalkSync-Setup-0.1.0.exe"
   )
 ```
@@ -131,7 +138,7 @@ switches:
 npm run sign:win -- -- `
   -DryRun `
   -Thumbprint "0000000000000000000000000000000000000000" `
-  -Files "dist-electron\win-unpacked\TalkSync.exe,dist-electron\win-unpacked\resources\elevate.exe"
+  -Files "dist-electron\win-unpacked\TalkSync.exe,dist-electron\TalkSync-Setup-0.1.0.exe"
 ```
 
 ## Verify Signatures
