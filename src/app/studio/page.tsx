@@ -11,6 +11,7 @@ import { getSupabaseClient, getCurrentUser, saveEncryptedKey, loadEncryptedKey }
 import { loadUserSettings, saveUserSettings } from '@/lib/userSettings';
 import { DeviceSelector } from '@/components/audio/DeviceSelector';
 import { useAutoAudioSetup } from '@/hooks/useAutoAudioSetup';
+import { isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
 import {
   TTS_VOICE_PRESETS, ELEVENLABS_VOICE_PRESETS, GEMINI_TTS_VOICE_PRESETS,
   fetchElevenLabsVoices, buildElevenLabsLabel,
@@ -118,8 +119,6 @@ function TranscriptCard({
 // VB-Cable (Windows) / BlackHole (macOS) / Voicemeeter / Soundflower 등
 // 장치 라벨에서 가상 오디오 드라이버 키워드를 검색
 // ─────────────────────────────────────────────
-const VIRTUAL_AUDIO_KEYWORDS = ['cable', 'virtual', 'blackhole', 'voicemeeter', 'soundflower', 'vb-audio'];
-
 async function detectVirtualAudioDevice(): Promise<boolean> {
   try {
     // 권한 없이 호출하면 라벨이 빈 문자열로 오므로 먼저 마이크 권한 요청
@@ -129,10 +128,7 @@ async function detectVirtualAudioDevice(): Promise<boolean> {
     } catch { /* 이미 허용됐거나 불가 — 계속 진행 */ }
 
     const devices = await navigator.mediaDevices.enumerateDevices();
-    return devices.some((d) => {
-      const label = d.label.toLowerCase();
-      return VIRTUAL_AUDIO_KEYWORDS.some((kw) => label.includes(kw));
-    });
+    return devices.some(isVirtualAudioDevice);
   } catch {
     return false;
   }
@@ -932,10 +928,14 @@ export default function StudioPage() {
     setEarphoneDeviceId(autoAudio.earphoneId);
     pipeline.setVirtualMicDevice(autoAudio.virtualMicId);
     pipeline.setEarphoneDevice(autoAudio.earphoneId);
-    setCableDetected(true);
     setVirtualCableReady(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoAudio.state, autoAudio.micId, autoAudio.virtualMicId, autoAudio.earphoneId]);
+
+  useEffect(() => {
+    setCableDetected(autoAudio.hasVirtualRoute);
+    if (autoAudio.hasVirtualRoute) setVirtualCableReady(true);
+  }, [autoAudio.hasVirtualRoute]);
 
   // ── 음성 레벨 업데이트 ──────────────────────
   const updateLevels = useCallback(() => {
@@ -1367,8 +1367,13 @@ export default function StudioPage() {
                       {
                         icon: '🔌',
                         title: 'TalkSync 가상 오디오 감지',
-                        desc: cableDetected ? 'TalkSync Virtual Audio Cable이 자동으로 선택됐어요' : '가상 오디오 드라이버가 감지되지 않았어요 — 설치 후 새로고침하세요',
-                        done: cableDetected,
+                        desc:
+                          autoAudio.state === 'ready'
+                            ? 'TalkSync 전용 장치가 자동으로 선택됐어요'
+                            : autoAudio.state === 'manual-review'
+                              ? '가상 오디오 장치가 감지됐지만 수동 확인이 필요해요'
+                              : '가상 오디오 드라이버가 감지되지 않았어요 — 설치 후 새로고침하세요',
+                        done: autoAudio.state === 'ready',
                         action: !cableDetected ? { label: '드라이버 설치', href: 'https://vb-audio.com/Cable/' } : undefined,
                       },
                       {
@@ -1468,7 +1473,7 @@ export default function StudioPage() {
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center gap-2.5 py-2.5 px-4 bg-emerald-50 border border-emerald-200 rounded-2xl">
                     <span className="text-emerald-600 text-base">✅</span>
-                    <span className="text-sm font-medium text-emerald-700">오디오 라우팅 자동 설정 완료</span>
+                    <span className="text-sm font-medium text-emerald-700">TalkSync 전용 오디오 라우팅 자동 설정 완료</span>
                     <button
                       onClick={() => setShowAdvancedDevices((v) => !v)}
                       className="ml-auto text-[11px] text-zinc-400 hover:text-zinc-600 underline underline-offset-2 transition-colors"
@@ -1508,6 +1513,62 @@ export default function StudioPage() {
                       />
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* fallback 감지 — 자동 바인딩 금지 */}
+              {autoAudio.state === 'manual-review' && (
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-start gap-2.5 py-2.5 px-4 bg-amber-50 border border-amber-200 rounded-2xl">
+                    <span className="text-amber-500 text-base mt-0.5">⚠️</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-amber-800">가상 오디오 장치 수동 확인 필요</p>
+                      <p className="text-[11px] text-amber-600 mt-0.5 leading-relaxed">
+                        {autoAudio.bindingMode === 'legacy-talksync'
+                          ? 'TalkSync legacy label은 감지됐지만 Speaker(Rx) / Microphone(Tx) 방향이 명확하지 않아요.'
+                          : '일반 virtual/cable 장치는 자동 선택하지 않습니다. 아래 장치를 직접 확인해 주세요.'}
+                      </p>
+                      {autoAudio.warnings.map((warning) => (
+                        <p key={warning} className="text-[11px] text-amber-700 mt-1 leading-relaxed">
+                          {warning}
+                        </p>
+                      ))}
+                    </div>
+                    <button
+                      onClick={autoAudio.rescan}
+                      className="text-xs px-3 py-1.5 bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-lg transition-colors shrink-0"
+                    >
+                      재검사
+                    </button>
+                  </div>
+
+                  <div className="flex gap-2 flex-wrap px-1">
+                    <DeviceBadge icon="🎧" label="입력" value={autoAudio.labels.mic} />
+                    <DeviceBadge icon="📡" label="송출 후보" value={autoAudio.labels.virtualMic} />
+                    <DeviceBadge icon="🔊" label="이어폰" value={autoAudio.labels.earphone} />
+                  </div>
+
+                  <div className="flex gap-3 flex-wrap pt-1 pl-1">
+                    <DeviceSelector
+                      label="마이크 입력"
+                      devices={pipeline.devices.inputs}
+                      value={micDeviceId}
+                      onChange={(id) => { setMicDeviceId(id); pipeline.setMicDevice(id); }}
+                    />
+                    <DeviceSelector
+                      label="가상 마이크 출력"
+                      devices={pipeline.devices.outputs}
+                      value={virtualMicDeviceId}
+                      onChange={(id) => { setVirtualMicDeviceId(id); pipeline.setVirtualMicDevice(id); }}
+                      requiresCable
+                    />
+                    <DeviceSelector
+                      label="이어폰 출력"
+                      devices={pipeline.devices.outputs}
+                      value={earphoneDeviceId}
+                      onChange={(id) => { setEarphoneDeviceId(id); pipeline.setEarphoneDevice(id); }}
+                    />
+                  </div>
                 </div>
               )}
 

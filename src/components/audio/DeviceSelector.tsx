@@ -1,6 +1,7 @@
 'use client';
 
 import { type AudioDevice } from '@/hooks/useAudioRouter';
+import { isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
 
 type Props = {
   label: string;
@@ -12,9 +13,7 @@ type Props = {
 };
 
 export function DeviceSelector({ label, devices, value, onChange, hint, requiresCable }: Props) {
-  const cableDetected = devices.some((d) =>
-    d.label.toLowerCase().includes('cable')
-  );
+  const cableDetected = devices.some(isVirtualAudioDevice);
   const showCableGuide = requiresCable && !cableDetected;
 
   return (

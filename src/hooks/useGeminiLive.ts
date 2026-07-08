@@ -15,6 +15,7 @@
 
 import { useRef, useCallback, useState, useEffect } from 'react';
 import { WavAccumulator, float32ToInt16Bytes } from '@/lib/wavExporter';
+import { isPhysicalOutputDevice, isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Gemini Multimodal Live API — BidiGenerateContent 엔드포인트
@@ -157,13 +158,6 @@ export function useGeminiLive() {
 
   const earphoneSinkReadyRef = useRef<boolean>(true);
 
-  // 가상 장치 감지 유틸리티
-  const isVirtualDevice = useCallback((label: string): boolean => {
-    const l = label.toLowerCase();
-    const virtualKeywords = ['cable', 'virtual', 'blackhole', 'voicemeeter', 'soundflower', 'vb-audio'];
-    return virtualKeywords.some((kw) => l.includes(kw));
-  }, []);
-
   // ── 자막 추출 Refs ────────────────────────────────────────
   // 모드(초저지연/프리미엄)와 무관하게 part.text를 수집 → turnComplete 시 콜백 실행
   const subtitleAccRef = useRef<string>('');
@@ -203,7 +197,7 @@ export function useGeminiLive() {
       try {
         const all = await navigator.mediaDevices.enumerateDevices();
         const outputs = all.filter((d) => d.kind === 'audiooutput');
-        const physicalOutput = outputs.find((d) => d.deviceId !== 'default' && !isVirtualDevice(d.label));
+        const physicalOutput = outputs.find(isPhysicalOutputDevice);
         if (physicalOutput) {
           targetSinkId = physicalOutput.deviceId;
           console.log('[GeminiLive] outputDeviceId가 default이므로 물리 장치 자동 대체:', physicalOutput.label);
@@ -221,7 +215,7 @@ export function useGeminiLive() {
         const all = await navigator.mediaDevices.enumerateDevices();
         const outputs = all.filter((d) => d.kind === 'audiooutput');
         const currentDevice = outputs.find((d) => d.deviceId === targetSinkId);
-        if (currentDevice && isVirtualDevice(currentDevice.label)) {
+        if (currentDevice && isVirtualAudioDevice(currentDevice)) {
           console.error('[GeminiLive] [누수 방쇄] 가상 장치로의 이어폰 출력이 감지되어 차단합니다:', currentDevice.label);
           earphoneSinkReadyRef.current = false;
         }
@@ -240,7 +234,7 @@ export function useGeminiLive() {
       }
     }
     return ctxRef.current;
-  }, [isVirtualDevice]);
+  }, []);
 
   // ── PCM 청크 스케줄 재생 ─────────────────────────────────────
   // AudioContext 타임라인에 순서대로 예약 → 네트워크 지터와 무관하게 끊김 없이 재생

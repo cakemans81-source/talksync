@@ -5,25 +5,28 @@
  *
  * 감지 전략:
  *   [물리 마이크]        audioinput  중 non-virtual 첫 번째
- *   [화상회의 수신]      audioinput  중 virtual (TalkSync Rx 등)
+ *   [TalkSync input]    audioinput  중 TalkSync Microphone/Tx label 우선
  *   [이어폰 출력]        audiooutput 중 non-virtual (시스템 기본)
- *   [화상회의 마이크]    audiooutput 중 virtual (TalkSync Tx 등)
+ *   [TalkSync output]   audiooutput 중 TalkSync Speaker/Rx label 우선
+ *
+ * TalkSync 전용 label이 명확한 경우만 ready로 처리한다.
+ * legacy/generic virtual cable은 manual-review 상태로 남긴다.
  */
 
 import { useState, useEffect, useCallback } from 'react';
-
-const VIRTUAL_KEYWORDS = ['cable', 'virtual', 'blackhole', 'voicemeeter', 'soundflower', 'vb-audio'];
-
-function isVirtual(label: string) {
-  const l = label.toLowerCase();
-  return VIRTUAL_KEYWORDS.some((kw) => l.includes(kw));
-}
+import {
+  isPhysicalInputDevice,
+  isPhysicalOutputDevice,
+  isVirtualAudioDevice,
+  selectAutoAudioDevices,
+  type VirtualBindingMode,
+} from '@/lib/audioDeviceBinding';
 
 function cleanLabel(label: string, fallback: string) {
   return label.replace(/\s*\(.*?\)\s*/g, '').trim() || fallback;
 }
 
-export type AutoAudioState = 'scanning' | 'ready' | 'no-cable' | 'error';
+export type AutoAudioState = 'scanning' | 'ready' | 'manual-review' | 'no-cable' | 'error';
 
 export type AutoAudioResult = {
   state: AutoAudioState;
@@ -42,6 +45,9 @@ export type AutoAudioResult = {
     earphone: string;
     virtualMic: string;
   };
+  bindingMode: VirtualBindingMode;
+  warnings: string[];
+  hasVirtualRoute: boolean;
   rescan: () => void;
 };
 
@@ -54,6 +60,9 @@ export function useAutoAudioSetup(): AutoAudioResult {
   const [labels, setLabels] = useState({
     mic: '', virtualSpeaker: '', earphone: '시스템 기본 출력', virtualMic: '',
   });
+  const [bindingMode, setBindingMode] = useState<VirtualBindingMode>('missing');
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [hasVirtualRoute, setHasVirtualRoute] = useState(false);
   const [tick, setTick] = useState(0);
 
   const scan = useCallback(async () => {
@@ -68,20 +77,14 @@ export function useAutoAudioSetup(): AutoAudioResult {
       const inputs  = devices.filter((d) => d.kind === 'audioinput');
       const outputs = devices.filter((d) => d.kind === 'audiooutput');
 
-      // ── 화상회의 수신 — TalkSync Rx 우선, 없으면 임의 virtual audioinput ──
-      // 우선순위: 1) label에 "cable-b"/"cable b" 포함  2) output 포함  3) 임의 virtual
-      const isCableB = (label: string) => /cable[\s-]?b\b/i.test(label);
-      const virtualInput =
-        inputs.find((d) => isVirtual(d.label) && isCableB(d.label)) ??
-        inputs.find((d) => isVirtual(d.label) && d.label.toLowerCase().includes('output')) ??
-        inputs.find((d) => isVirtual(d.label));
+      const virtualSelection = selectAutoAudioDevices(inputs, outputs);
+      const virtualInput = virtualSelection.virtualInput;
+      const virtualOutput = virtualSelection.virtualOutput;
+      const hasRouteCandidate = Boolean(virtualInput && virtualOutput);
 
-      // ── 화상회의 송신 — TalkSync Tx 우선 (non-B), 없으면 임의 virtual audiooutput ──
-      // 우선순위: 1) input 포함 + non-B  2) input 포함  3) 임의 virtual
-      const virtualOutput =
-        outputs.find((d) => isVirtual(d.label) && d.label.toLowerCase().includes('input') && !isCableB(d.label)) ??
-        outputs.find((d) => isVirtual(d.label) && d.label.toLowerCase().includes('input')) ??
-        outputs.find((d) => isVirtual(d.label));
+      setBindingMode(virtualSelection.mode);
+      setWarnings(virtualSelection.warnings);
+      setHasVirtualRoute(hasRouteCandidate);
 
       if (!virtualInput || !virtualOutput) {
         setState('no-cable');
@@ -89,13 +92,13 @@ export function useAutoAudioSetup(): AutoAudioResult {
       }
 
       // ── 물리 마이크 — non-virtual audioinput ─────────────────────────
-      const physMic = inputs.find((d) => d.deviceId !== 'default' && !isVirtual(d.label))
+      const physMic = inputs.find(isPhysicalInputDevice)
         ?? inputs.find((d) => d.deviceId === 'default')
         ?? inputs[0];
 
       // ── 이어폰 — non-virtual audiooutput, 실제 device ID 우선 (default alias 제외) ─
-      const physSpeaker = outputs.find((d) => d.deviceId !== 'default' && !isVirtual(d.label))
-        ?? outputs.find((d) => !isVirtual(d.label));
+      const physSpeaker = outputs.find(isPhysicalOutputDevice)
+        ?? outputs.find((d) => !isVirtualAudioDevice(d));
 
       setMicId(physMic?.deviceId ?? 'default');
       setVirtualSpeakerId(virtualInput.deviceId);
@@ -107,15 +110,32 @@ export function useAutoAudioSetup(): AutoAudioResult {
         earphone:       cleanLabel(physSpeaker?.label ?? '', '시스템 기본 출력'),
         virtualMic:     cleanLabel(virtualOutput.label, 'TalkSync Tx'),
       });
-      setState('ready');
+      setState(virtualSelection.mode === 'exact-talksync' ? 'ready' : 'manual-review');
     } catch {
+      setBindingMode('missing');
+      setWarnings(['오디오 장치 스캔 중 오류가 발생했습니다.']);
+      setHasVirtualRoute(false);
       setState('error');
     }
   }, []);
 
-  useEffect(() => { scan(); }, [scan, tick]);
+  useEffect(() => {
+    const id = window.setTimeout(() => { void scan(); }, 0);
+    return () => window.clearTimeout(id);
+  }, [scan, tick]);
 
   const rescan = useCallback(() => setTick((n) => n + 1), []);
 
-  return { state, micId, virtualSpeakerId, earphoneId, virtualMicId, labels, rescan };
+  return {
+    state,
+    micId,
+    virtualSpeakerId,
+    earphoneId,
+    virtualMicId,
+    labels,
+    bindingMode,
+    warnings,
+    hasVirtualRoute,
+    rescan,
+  };
 }

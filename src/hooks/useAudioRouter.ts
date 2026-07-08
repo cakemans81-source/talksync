@@ -2,6 +2,7 @@
 
 import { useRef, useCallback, useEffect, useState, type MutableRefObject } from 'react';
 import { attachVAD, mixStreams, type VADCallbacks, type VADOptions } from '@/lib/systemAudioCapture';
+import { isPhysicalOutputDevice, isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
 
 // ─────────────────────────────────────────────
 // 가상 오디오 케이블 설치 & 브라우저 연동 가이드
@@ -237,13 +238,6 @@ class AudioRouter {
   }
 
   // ── Blob → 이어폰 (setSinkId 적용) ──────────
-  private isVirtualDevice(label: string): boolean {
-    const l = label.toLowerCase();
-    const virtualKeywords = ['cable', 'virtual', 'blackhole', 'voicemeeter', 'soundflower', 'vb-audio'];
-    return virtualKeywords.some((kw) => l.includes(kw));
-  }
-
-  // ── Blob → 이어폰 (setSinkId 적용) ──────────
   async playBlobToEarphone(blob: Blob): Promise<void> {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
@@ -255,7 +249,7 @@ class AudioRouter {
     if (targetSinkId === 'default') {
       try {
         const { outputs } = await AudioRouter.enumerateDevices();
-        const physicalOutput = outputs.find((d) => d.deviceId !== 'default' && !this.isVirtualDevice(d.label));
+        const physicalOutput = outputs.find(isPhysicalOutputDevice);
         if (physicalOutput) {
           targetSinkId = physicalOutput.deviceId;
           console.log('[AudioRouter] earphoneDeviceId가 default이므로 물리 장치 자동 대체 바인딩:', physicalOutput.label);
@@ -272,7 +266,7 @@ class AudioRouter {
       try {
         const { outputs } = await AudioRouter.enumerateDevices();
         const currentDevice = outputs.find((d) => d.deviceId === targetSinkId);
-        if (currentDevice && this.isVirtualDevice(currentDevice.label)) {
+        if (currentDevice && isVirtualAudioDevice(currentDevice)) {
           URL.revokeObjectURL(url);
           throw new Error(`가상 장치로의 이어폰 출력 재생이 거부되었습니다: ${currentDevice.label}`);
         }
