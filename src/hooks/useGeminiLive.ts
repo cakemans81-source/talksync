@@ -16,15 +16,20 @@
 import { useRef, useCallback, useState, useEffect } from 'react';
 import { WavAccumulator, float32ToInt16Bytes } from '@/lib/wavExporter';
 import { isPhysicalOutputDevice, isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
+import {
+  GEMINI_LIVE_TRANSLATE_DISPLAY_NAME,
+  GEMINI_LIVE_TRANSLATE_MODEL,
+  GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE,
+} from '@/lib/geminiModels';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Gemini Multimodal Live API — BidiGenerateContent 엔드포인트
+// Gemini Live Translate API — BidiGenerateContent 엔드포인트
 // Ref: https://ai.google.dev/api/multimodal-live
 // ─────────────────────────────────────────────────────────────────────────────
 const WS_ENDPOINT =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent';
 
-/** Gemini Live API 출력 PCM 샘플레이트 (고정값) */
+/** Gemini Live Translate API 출력 PCM 샘플레이트 (고정값) */
 const OUTPUT_SAMPLE_RATE = 24000;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -37,8 +42,8 @@ export type GeminiLiveConfig = {
   /** Gemini API 키 */
   apiKey: string;
   /**
-   * Gemini Live 지원 모델
-   * 기본: 'models/gemini-3.1-flash-live-preview'
+   * Gemini Live Translate 지원 모델
+   * 기본: GEMINI_LIVE_TRANSLATE_MODEL
    */
   model?: string;
   /**
@@ -414,7 +419,7 @@ export function useGeminiLive() {
         // system_instruction → 통역사 역할 및 언어 지시
         const setupMsg = {
           setup: {
-            model: config.model ?? 'models/gemini-3.1-flash-live-preview',
+            model: config.model ?? GEMINI_LIVE_TRANSLATE_MODEL,
             generation_config: {
               response_modalities: ['AUDIO'],
               speech_config: {
@@ -433,7 +438,7 @@ export function useGeminiLive() {
           },
         };
         ws.send(JSON.stringify(setupMsg));
-        console.log('[GeminiLive] 연결됨 — setup 전송 완료');
+        console.log(`[GeminiLive] ${GEMINI_LIVE_TRANSLATE_DISPLAY_NAME} setup 전송 완료`);
 
         // keepalive: 10초마다 빈 텍스트 턴 전송 → 서버 idle timeout 방지
         if (keepaliveTimerRef.current) clearInterval(keepaliveTimerRef.current);
@@ -458,7 +463,7 @@ export function useGeminiLive() {
 
       ws.onerror = () => {
         didError = true;
-        const msg = 'WebSocket 연결 오류 — API 키 및 네트워크를 확인하세요';
+        const msg = GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE;
         console.error('[GeminiLive]', msg);
         setError(msg);
         setState('error');
@@ -493,7 +498,15 @@ export function useGeminiLive() {
           }, delay);
         } else {
           reconnectCountRef.current = 0;
-          setState('disconnected');
+          if (!didError && ev.code !== 1000) {
+            const reason = ev.reason ? ` (${ev.reason})` : '';
+            const msg = `${GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE} [close ${ev.code}${reason}]`;
+            console.error('[GeminiLive]', msg);
+            setError(msg);
+            setState('error');
+          } else {
+            setState('disconnected');
+          }
         }
       };
     },

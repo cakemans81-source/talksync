@@ -19,6 +19,10 @@ import {
   type TTSEngine, type ElevenLabsVoice,
 } from '@/lib/tts';
 import { VAD_TRANSLATION_PRESETS } from '@/lib/systemAudioCapture';
+import {
+  GEMINI_LIVE_TRANSLATE_DISPLAY_NAME,
+  GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE,
+} from '@/lib/geminiModels';
 
 // ── Gemini 출력 후처리: 타겟 언어 텍스트만 추출 ──────────
 function extractTranslation(raw: string, targetLangCode: string): string {
@@ -315,7 +319,7 @@ function WebOnlyFallback() {
 }
 
 // ─────────────────────────────────────────────
-// Gemini Live 상태 시각화 — 파동 애니메이션
+// Gemini Live Translate 상태 시각화 — 파동 애니메이션
 // ─────────────────────────────────────────────
 const LIVE_VOICES = [
   { name: 'Aoede',  label: 'Aoede — 밝은 여성' },
@@ -353,7 +357,7 @@ function LiveStatusIndicator({ phase }: { phase: LivePhase }) {
 }
 
 // ─────────────────────────────────────────────
-// Gemini Live 통역 패널
+// Gemini Live Translate 통역 패널
 // ─────────────────────────────────────────────
 function GeminiLivePanel({
   wsState,
@@ -404,7 +408,7 @@ function GeminiLivePanel({
         {/* 배지 */}
         <div className="flex items-center gap-1.5 shrink-0">
           <div className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
-          <span className="text-xs font-semibold text-zinc-700">Gemini Live</span>
+          <span className="text-xs font-semibold text-zinc-700">{GEMINI_LIVE_TRANSLATE_DISPLAY_NAME}</span>
           <span className="text-[10px] font-medium text-indigo-600 bg-indigo-100 px-1.5 py-0.5 rounded-full">Beta</span>
         </div>
 
@@ -509,7 +513,7 @@ function GeminiLivePanel({
                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3zm6 10a1 1 0 0 0-2 0 4 4 0 0 1-8 0 1 1 0 0 0-2 0 6 6 0 0 0 5 5.92V19H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-2.08A6 6 0 0 0 18 11z"/>
                 </svg>
-                Live 시작
+                Live Translate 시작
               </>
             )}
           </button>
@@ -714,7 +718,7 @@ export default function StudioPage() {
   const VAD_SPEED_PRESETS = VAD_TRANSLATION_PRESETS;
   const [vadSpeed, setVadSpeed] = useState<VADSpeed>('balanced');
 
-  // ── Gemini Live V2 파이프라인 상태 ────────────
+  // ── Gemini Live Translate V2 파이프라인 상태 ────────────
   const [liveActive, setLiveActive] = useState(false);
   const [liveVoice, setLiveVoice] = useState('Aoede');
   const [liveToast, setLiveToast] = useState<string | null>(null);
@@ -807,7 +811,7 @@ export default function StudioPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 마운트 시 1회 — 내부에서 ref 직접 참조
 
-  // ── Gemini Live 자막 콜백 등록 (마운트 시 1회) ──────────────
+  // ── Gemini Live Translate 자막 콜백 등록 (마운트 시 1회) ──────────────
   useEffect(() => {
     geminiLive.setSubtitleCallback((text: string) => {
       const clean = extractTranslation(text, liveCustomTTSParamsRef.current.micLang);
@@ -1007,7 +1011,7 @@ export default function StudioPage() {
     }
   }
 
-  // ── Gemini Live: TTS 출력 모드 전환 ─────────────────────────
+  // ── Gemini Live Translate: TTS 출력 모드 전환 ─────────────────────────
   function handleCustomTTSToggle(enabled: boolean) {
     setLiveCustomTTS(enabled);
     localStorage.setItem('liveCustomTTS', enabled ? '1' : '0');
@@ -1032,7 +1036,7 @@ export default function StudioPage() {
     setTtsVoice(voice);
   }
 
-  // ── Gemini Live: speaking 상태 폴링 (RAF) ───────────────
+  // ── Gemini Live Translate: speaking 상태 폴링 (RAF) ───────────────
   // muteUntilRef는 렌더를 트리거하지 않으므로 RAF로 직접 polling
   useEffect(() => {
     if (!liveActive) { setIsSpeakingLive(false); return; }
@@ -1045,7 +1049,7 @@ export default function StudioPage() {
     return () => cancelAnimationFrame(rafId);
   }, [liveActive, geminiLive.muteUntilRef]);
 
-  // ── Gemini Live: WS 상태 변화 감지 ──────────────────────
+  // ── Gemini Live Translate: WS 상태 변화 감지 ──────────────────────
   // 'ready' → VAD 시작 / 'error' → 토스트 + 정리 / 예상치 못한 'disconnected' → 정리
   useEffect(() => {
     if (!liveStartedRef.current) return;
@@ -1100,7 +1104,7 @@ export default function StudioPage() {
     }
 
     if (geminiLive.state === 'error') {
-      setLiveToast(geminiLive.error ?? 'Gemini Live 연결 오류 — API 키와 네트워크를 확인하세요');
+      setLiveToast(geminiLive.error ?? GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE);
       liveStartedRef.current = false;
       setLiveActive(false);
       setIsVADProcessing(false);
@@ -1109,7 +1113,7 @@ export default function StudioPage() {
     if (geminiLive.state === 'disconnected' && liveWasReadyRef.current) {
       // ready 이후 예상치 못한 연결 끊김만 처리
       // (connect() 전 setLiveActive(true) 리렌더링 시 state='disconnected' 오발 방지)
-      setLiveToast('Gemini Live 연결이 끊겼습니다. 다시 시작해 주세요.');
+      setLiveToast('Gemini Live Translate 연결이 끊겼습니다. 다시 시작해 주세요.');
       liveWasReadyRef.current = false;
       liveStartedRef.current = false;
       setLiveActive(false);
@@ -1122,14 +1126,14 @@ export default function StudioPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geminiLive.state]);
 
-  // ── Gemini Live: 토스트 자동 소거 ────────────────────────
+  // ── Gemini Live Translate: 토스트 자동 소거 ────────────────────────
   useEffect(() => {
     if (!liveToast) return;
     const t = setTimeout(() => setLiveToast(null), 6000);
     return () => clearTimeout(t);
   }, [liveToast]);
 
-  // ── Gemini Live: 시작 ────────────────────────────────────
+  // ── Gemini Live Translate: 시작 ────────────────────────────────────
   async function handleLiveStart() {
     if (!apiKey) { setShowApiModal(true); return; }
 
@@ -1197,7 +1201,7 @@ export default function StudioPage() {
     });
   }
 
-  // ── Gemini Live: 정지 ────────────────────────────────────
+  // ── Gemini Live Translate: 정지 ────────────────────────────────────
   function handleLiveStop() {
     liveStartedRef.current = false;
     liveWasReadyRef.current = false;
@@ -1241,7 +1245,7 @@ export default function StudioPage() {
         </div>
       )}
 
-      {/* Gemini Live 에러 / 경고 토스트 */}
+      {/* Gemini Live Translate 에러 / 경고 토스트 */}
       {liveToast && (
         <div className="fixed top-4 right-4 z-[150] bg-zinc-900 text-white px-4 py-3 rounded-2xl shadow-2xl text-sm flex items-center gap-2.5 max-w-xs animate-in slide-in-from-right-4">
           <span className="shrink-0 w-5 h-5 rounded-full bg-red-500 flex items-center justify-center text-[10px] font-bold">!</span>
@@ -1390,8 +1394,8 @@ export default function StudioPage() {
                       },
                       {
                         icon: '🚀',
-                        title: 'Gemini Live 시작',
-                        desc: '상단 패널에서 [Live 시작] 버튼을 누르세요',
+                        title: 'Gemini Live Translate 시작',
+                        desc: '상단 패널에서 [Live Translate 시작] 버튼을 누르세요',
                         done: false,
                       },
                     ].map(({ icon, title, desc, done, action }) => (
@@ -1431,7 +1435,7 @@ export default function StudioPage() {
         {/* ── 컨트롤 바 ── */}
         <div className="bg-white border-t border-zinc-100 px-5 py-4 shadow-lg">
 
-          {/* Gemini Live V2 통역 패널 */}
+          {/* Gemini Live Translate V2 통역 패널 */}
           <div className="mb-4">
             <GeminiLivePanel
               wsState={geminiLive.state}
