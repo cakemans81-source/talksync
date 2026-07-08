@@ -4,6 +4,7 @@ const isElectronBuild = process.env.ELECTRON_BUILD === 'true';
 
 const nextConfig: NextConfig = {
   reactCompiler: true,
+  allowedDevOrigins: ['127.0.0.1'],
 
   // Electron 빌드: next export (out/ 폴더 → electron-builder 패키징)
   // Vercel/웹 빌드: 기본 서버 렌더링 모드 유지

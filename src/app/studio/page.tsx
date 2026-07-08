@@ -557,10 +557,13 @@ function GeminiLivePanel({
 
 // ── API 키 설정 모달 ──────────────────────────
 function ApiKeyModal({
-  userId, onSave,
+  userId, hasExistingKey, onUserResolved, onSave, onClose,
 }: {
-  userId: string;
+  userId: string | null;
+  hasExistingKey: boolean;
+  onUserResolved: (userId: string) => void;
   onSave: (key: string) => void;
+  onClose: () => void;
 }) {
   const [apiKey, setApiKey] = useState('');
   const [loading, setLoading] = useState(false);
@@ -585,15 +588,23 @@ function ApiKeyModal({
   async function handleSave() {
     setLoading(true);
     try {
-      const encrypted = await encryptApiKey(apiKey.trim(), userId);
+      let resolvedUserId = userId;
+      if (!resolvedUserId) {
+        const user = await getCurrentUser();
+        if (!user) throw new Error('로그인 상태를 확인할 수 없습니다. 다시 로그인한 뒤 API 키를 저장해 주세요.');
+        resolvedUserId = user.id;
+        onUserResolved(user.id);
+      }
+
+      const encrypted = await encryptApiKey(apiKey.trim(), resolvedUserId);
 
       // 로컬 저장 먼저 — Supabase가 실패해도 다음 로그인 시 복원 가능
-      saveKeyLocally(encrypted, userId);
+      saveKeyLocally(encrypted, resolvedUserId);
       cacheApiKeyInSession(apiKey.trim());
 
       // Supabase 저장 (실패해도 로컬에 있으므로 앱 동작엔 영향 없음)
       try {
-        await saveEncryptedKey(userId, encrypted);
+        await saveEncryptedKey(resolvedUserId, encrypted);
       } catch { /* Supabase 저장 실패 — 로컬에 저장됐으므로 계속 진행 */ }
 
       onSave(apiKey.trim());
@@ -605,8 +616,18 @@ function ApiKeyModal({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-8 border border-zinc-100">
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[220] flex items-center justify-center p-4">
+      <div className="relative bg-white rounded-3xl shadow-2xl w-full max-w-lg p-8 border border-zinc-100">
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={loading}
+          aria-label="API 키 설정 닫기"
+          className="absolute right-5 top-5 w-8 h-8 rounded-full border border-zinc-200 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-50 disabled:opacity-40 transition-colors"
+        >
+          ×
+        </button>
+
         {/* 헤더 */}
         <div className="flex items-start gap-4 mb-7">
           <div className="w-12 h-12 bg-zinc-900 rounded-2xl flex items-center justify-center flex-shrink-0">
@@ -617,6 +638,12 @@ function ApiKeyModal({
             <p className="text-sm text-zinc-400 mt-0.5">통역에 사용할 API 키를 입력해주세요</p>
           </div>
         </div>
+
+        {hasExistingKey && (
+          <div className="mb-4 p-3 bg-green-50 border border-green-100 rounded-xl text-sm text-green-700">
+            저장된 Gemini API 키가 있습니다. 새 키를 저장하면 기존 키가 교체됩니다.
+          </div>
+        )}
 
         {/* API 가이드 */}
         <div className="bg-zinc-50 rounded-2xl p-4 mb-6 border border-zinc-100">
@@ -759,6 +786,24 @@ export default function StudioPage() {
   const [liveSubtitles, setLiveSubtitles] = useState<Array<{ id: string; text: string; timestamp: number }>>([]);
   // 커스텀 TTS 콜백에서 최신 TTS 파라미터를 읽기 위한 Ref (stale closure 방지)
   const liveCustomTTSParamsRef = useRef({ ttsEngine, ttsVoice, ttsRate, elevenLabsApiKey, apiKey, micLang });
+
+  const openApiKeyModal = useCallback(() => {
+    setShowApiModal(true);
+
+    if (userId) return;
+
+    void getCurrentUser()
+      .then((user) => {
+        if (user) {
+          setUserId(user.id);
+          return;
+        }
+        router.replace('/login');
+      })
+      .catch(() => {
+        setLiveToast('로그인 상태를 확인할 수 없습니다. 다시 로그인한 뒤 API 키를 설정해 주세요.');
+      });
+  }, [router, userId]);
   // 커스텀 TTS 콜백 Ref — 항상 최신 paramsRef를 통해 읽음
   const liveCustomTTSCallbackRef = useRef<(text: string) => void>(() => {});
 
@@ -1181,7 +1226,10 @@ export default function StudioPage() {
 
   // ── Gemini Live Translate: 시작 ────────────────────────────────────
   async function handleLiveStart() {
-    if (!apiKey) { setShowApiModal(true); return; }
+    if (!apiKey) {
+      openApiKeyModal();
+      return;
+    }
 
     if (earphoneDeviceId === 'default') {
       setLiveToast('이어폰 장치를 먼저 선택해 주세요 — 하단 "이어폰 출력" 드롭다운을 확인하세요');
@@ -1289,10 +1337,13 @@ export default function StudioPage() {
       )}
 
       {/* API 키 모달 */}
-      {showApiModal && userId && (
+      {showApiModal && (
         <ApiKeyModal
-          userId={userId}
+          userId={userId || null}
+          hasExistingKey={Boolean(apiKey)}
+          onUserResolved={setUserId}
           onSave={(key) => { setApiKey(key); setShowApiModal(false); }}
+          onClose={() => setShowApiModal(false)}
         />
       )}
 
@@ -1336,7 +1387,7 @@ export default function StudioPage() {
 
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setShowApiModal(true)}
+              onClick={() => { void openApiKeyModal(); }}
               className={`flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl transition ${
                 apiKey
                   ? 'text-green-700 bg-green-50 hover:bg-green-100 border border-green-200'
@@ -1394,7 +1445,7 @@ export default function StudioPage() {
 
                   {!apiKey && (
                     <button
-                      onClick={() => setShowApiModal(true)}
+                      onClick={() => { void openApiKeyModal(); }}
                       className="flex items-center gap-2 px-4 py-2 bg-amber-50 border border-amber-200 text-amber-700 text-sm rounded-xl hover:bg-amber-100 transition"
                     >
                       ⚠ Gemini API 키 설정 필요
