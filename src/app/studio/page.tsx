@@ -10,7 +10,9 @@ import { encryptApiKey, decryptApiKey, cacheApiKeyInSession, getCachedApiKey, sa
 import { getSupabaseClient, getCurrentUser, saveEncryptedKey, loadEncryptedKey } from '@/lib/supabase';
 import { loadUserSettings, saveUserSettings } from '@/lib/userSettings';
 import { DeviceSelector } from '@/components/audio/DeviceSelector';
+import { BrowserTabTranslatePanel } from '@/components/audio/BrowserTabTranslatePanel';
 import { useAutoAudioSetup } from '@/hooks/useAutoAudioSetup';
+import { useBrowserTabAudioCapture } from '@/hooks/useBrowserTabAudioCapture';
 import { isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
 import {
   TTS_VOICE_PRESETS, ELEVENLABS_VOICE_PRESETS, GEMINI_TTS_VOICE_PRESETS,
@@ -283,6 +285,7 @@ function VirtualCableGuard({ onDetected }: { onDetected: () => void }) {
 // 데스크탑 앱(Electron)에서는 렌더링되지 않음
 const WEB_DOWNLOAD_URL =
   "https://github.com/cakemans81-source/talksync/releases/latest/download/TalkSync-Setup.exe";
+const ENABLE_BROWSER_TAB_CAPTURE_WEB_DEV = process.env.NODE_ENV === 'development';
 
 function WebOnlyFallback() {
   return (
@@ -678,6 +681,7 @@ export default function StudioPage() {
   const pipeline = useTranslationPipeline();
   const geminiLive = useGeminiLive();
   const autoAudio = useAutoAudioSetup();
+  const browserTabAudio = useBrowserTabAudioCapture();
   const subtitleEndRef = useRef<HTMLDivElement>(null);
 
   const [userId, setUserId] = useState('');
@@ -743,6 +747,9 @@ export default function StudioPage() {
   const liveCustomTTSParamsRef = useRef({ ttsEngine, ttsVoice, ttsRate, elevenLabsApiKey, apiKey, micLang });
   // 커스텀 TTS 콜백 Ref — 항상 최신 paramsRef를 통해 읽음
   const liveCustomTTSCallbackRef = useRef<(text: string) => void>(() => {});
+
+  const listenLanguageLabel = SUPPORTED_LANGUAGES.find((l) => l.code === micLang)?.label ?? micLang;
+  const meetingVoiceLanguageLabel = SUPPORTED_LANGUAGES.find((l) => l.code === sysLang)?.label ?? sysLang;
 
   // ── Electron 환경 감지 (마운트 시 1회) ──────
   useEffect(() => {
@@ -1217,8 +1224,8 @@ export default function StudioPage() {
     setLiveSubtitles([]);
   }
 
-  // 웹 환경(비 Electron) — 전체 화면 다운로드 안내로 대체
-  if (isElectron === false) return <WebOnlyFallback />;
+  // 웹 환경(비 Electron) — 프로덕션은 다운로드 안내 유지, dev localhost는 Browser Tab capture smoke 허용
+  if (isElectron === false && !ENABLE_BROWSER_TAB_CAPTURE_WEB_DEV) return <WebOnlyFallback />;
 
   return (
     <>
@@ -1434,6 +1441,19 @@ export default function StudioPage() {
 
         {/* ── 컨트롤 바 ── */}
         <div className="bg-white border-t border-zinc-100 px-5 py-4 shadow-lg">
+
+          {/* Browser Tab Translate Mode — capture-only MVP */}
+          <BrowserTabTranslatePanel
+            state={browserTabAudio.state}
+            sourceLabel={browserTabAudio.sourceLabel}
+            error={browserTabAudio.error}
+            level={browserTabAudio.level}
+            hasAudioTrack={browserTabAudio.hasAudioTrack}
+            targetLanguageLabel={listenLanguageLabel}
+            txLanguageLabel={meetingVoiceLanguageLabel}
+            onStartCapture={browserTabAudio.startCapture}
+            onStopCapture={() => browserTabAudio.stopCapture()}
+          />
 
           {/* Gemini Live Translate V2 통역 패널 */}
           <div className="mb-4">
