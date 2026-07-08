@@ -286,6 +286,7 @@ function VirtualCableGuard({ onDetected }: { onDetected: () => void }) {
 const WEB_DOWNLOAD_URL =
   "https://github.com/cakemans81-source/talksync/releases/latest/download/TalkSync-Setup.exe";
 const ENABLE_BROWSER_TAB_CAPTURE_WEB_DEV = process.env.NODE_ENV === 'development';
+const DRIVER_CHECK_TIMEOUT_MS = 2500;
 
 function WebOnlyFallback() {
   return (
@@ -370,6 +371,8 @@ function GeminiLivePanel({
   liveError,
   liveCustomTTS,
   vadSpeed,
+  disabled = false,
+  disabledReason,
   onStart,
   onStop,
   onVoiceChange,
@@ -383,6 +386,8 @@ function GeminiLivePanel({
   liveError: string | null;
   liveCustomTTS: boolean;
   vadSpeed: 'fast' | 'balanced' | 'accurate';
+  disabled?: boolean;
+  disabledReason?: string;
   onStart: () => void;
   onStop: () => void;
   onVoiceChange: (v: string) => void;
@@ -390,6 +395,7 @@ function GeminiLivePanel({
   onVadSpeedChange: (speed: 'fast' | 'balanced' | 'accurate') => void;
 }) {
   const isConnecting = wsState === 'connecting';
+  const startDisabled = isConnecting || disabled;
 
   const dotColor =
     !liveActive                  ? 'bg-zinc-300'
@@ -499,18 +505,26 @@ function GeminiLivePanel({
           </span>
         )}
 
+        {disabled && disabledReason && !liveActive && (
+          <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-xl shrink-0">
+            {disabledReason}
+          </span>
+        )}
+
         {/* 시작 / 정지 버튼 */}
         {!liveActive ? (
           <button
             onClick={onStart}
-            disabled={isConnecting}
-            className="flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white text-xs font-medium rounded-xl transition-colors shrink-0 shadow shadow-indigo-600/20"
+            disabled={startDisabled}
+            className="flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-zinc-300 disabled:shadow-none text-white text-xs font-medium rounded-xl transition-colors shrink-0 shadow shadow-indigo-600/20"
           >
             {isConnecting ? (
               <>
                 <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 연결 중...
               </>
+            ) : disabled ? (
+              '드라이버 필요'
             ) : (
               <>
                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
@@ -928,7 +942,32 @@ export default function StudioPage() {
       setVirtualCableReady(true); // 웹 환경 → 검사 스킵, 즉시 통과
       return;
     }
-    detectVirtualAudioDevice().then((found) => setVirtualCableReady(found));
+
+    let settled = false;
+    const timeoutId = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      setVirtualCableReady(false);
+    }, DRIVER_CHECK_TIMEOUT_MS);
+
+    detectVirtualAudioDevice()
+      .then((found) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        setVirtualCableReady(found);
+      })
+      .catch(() => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        setVirtualCableReady(false);
+      });
+
+    return () => {
+      settled = true;
+      window.clearTimeout(timeoutId);
+    };
   }, [virtualCableReady]);
 
   // ── 자동 오디오 설정 결과 → device state 반영 ──────────
@@ -1224,26 +1263,15 @@ export default function StudioPage() {
     setLiveSubtitles([]);
   }
 
+  const fullVoiceReplacementReady = autoAudio.state === 'ready' && virtualCableReady === true;
+  const driverCheckInProgress = virtualCableReady === null || autoAudio.state === 'scanning';
+  const driverNoticeVisible = !fullVoiceReplacementReady;
+
   // 웹 환경(비 Electron) — 프로덕션은 다운로드 안내 유지, dev localhost는 Browser Tab capture smoke 허용
   if (isElectron === false && !ENABLE_BROWSER_TAB_CAPTURE_WEB_DEV) return <WebOnlyFallback />;
 
   return (
     <>
-      {/* 초기 장치 스캔 중 — 메인 UI 노출 전 블로킹 */}
-      {virtualCableReady === null && (
-        <div className="fixed inset-0 z-[100] bg-white flex items-center justify-center">
-          <div className="flex flex-col items-center gap-3">
-            <span className="w-8 h-8 border-2 border-zinc-200 border-t-zinc-900 rounded-full animate-spin" />
-            <p className="text-sm text-zinc-400">오디오 장치 확인 중...</p>
-          </div>
-        </div>
-      )}
-
-      {/* 가상 오디오 케이블 설치 가드 — 미설치 시 전체 UI 차단 */}
-      {virtualCableReady === false && (
-        <VirtualCableGuard onDetected={() => setVirtualCableReady(true)} />
-      )}
-
       {/* ElevenLabs 보이스 패치 에러 토스트 */}
       {elVoicesError && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-[150] bg-red-700 text-white px-4 py-3 rounded-2xl shadow-2xl text-sm flex items-center gap-2 max-w-sm">
@@ -1442,6 +1470,36 @@ export default function StudioPage() {
         {/* ── 컨트롤 바 ── */}
         <div className="bg-white border-t border-zinc-100 px-5 py-4 shadow-lg">
 
+          {driverNoticeVisible && (
+            <div className="mb-4 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+              <span className="text-amber-500 text-base mt-0.5">⚠</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-amber-800">
+                  {driverCheckInProgress
+                    ? 'TalkSync 가상 오디오 드라이버를 확인 중입니다'
+                    : 'TalkSync 가상 오디오 드라이버가 감지되지 않았습니다'}
+                </p>
+                <p className="text-[11px] text-amber-700 mt-0.5 leading-relaxed">
+                  Browser Tab Translate Mode는 드라이버 없이 사용할 수 있습니다. 양방향 치환 모드와 회의방 송출은 TalkSync Virtual Speaker(Rx) / Microphone(Tx) 감지 후 활성화됩니다.
+                </p>
+              </div>
+              <div className="flex gap-2 shrink-0">
+                <button
+                  onClick={autoAudio.rescan}
+                  className="text-xs px-3 py-1.5 bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-lg transition-colors"
+                >
+                  재검사
+                </button>
+                <button
+                  onClick={() => openExternal('https://vb-audio.com/Cable/')}
+                  className="text-xs px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg transition-colors font-medium"
+                >
+                  설치하기
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Browser Tab Translate Mode — capture-only MVP */}
           <BrowserTabTranslatePanel
             state={browserTabAudio.state}
@@ -1468,6 +1526,8 @@ export default function StudioPage() {
               liveVoice={liveVoice}
               liveError={null}
               liveCustomTTS={liveCustomTTS}
+              disabled={!fullVoiceReplacementReady}
+              disabledReason="양방향 치환 모드는 드라이버 필요"
               onStart={handleLiveStart}
               onStop={handleLiveStop}
               onVoiceChange={setLiveVoice}
