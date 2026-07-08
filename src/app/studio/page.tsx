@@ -10,7 +10,7 @@ import { encryptApiKey, decryptApiKey, cacheApiKeyInSession, getCachedApiKey, sa
 import { getSupabaseClient, getCurrentUser, saveEncryptedKey, loadEncryptedKey } from '@/lib/supabase';
 import { loadUserSettings, saveUserSettings } from '@/lib/userSettings';
 import { DeviceSelector } from '@/components/audio/DeviceSelector';
-import { BrowserTabTranslatePanel } from '@/components/audio/BrowserTabTranslatePanel';
+import { BrowserTabTranslatePanel, type BrowserTabLiveTranslateState } from '@/components/audio/BrowserTabTranslatePanel';
 import { useAutoAudioSetup } from '@/hooks/useAutoAudioSetup';
 import { useBrowserTabAudioCapture } from '@/hooks/useBrowserTabAudioCapture';
 import { isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
@@ -24,6 +24,7 @@ import { VAD_TRANSLATION_PRESETS } from '@/lib/systemAudioCapture';
 import {
   GEMINI_LIVE_TRANSLATE_DISPLAY_NAME,
   GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE,
+  toGeminiLiveTranslateLanguageCode,
 } from '@/lib/geminiModels';
 
 // ── Gemini 출력 후처리: 타겟 언어 텍스트만 추출 ──────────
@@ -721,6 +722,7 @@ export default function StudioPage() {
   const router = useRouter();
   const pipeline = useTranslationPipeline();
   const geminiLive = useGeminiLive();
+  const browserTabGeminiLive = useGeminiLive();
   const autoAudio = useAutoAudioSetup();
   const browserTabAudio = useBrowserTabAudioCapture();
   const subtitleEndRef = useRef<HTMLDivElement>(null);
@@ -784,6 +786,11 @@ export default function StudioPage() {
   const [liveCustomTTS, setLiveCustomTTS] = useState(false);
   // V2 실시간 자막 (turnComplete 시 Gemini 텍스트 파트 수집)
   const [liveSubtitles, setLiveSubtitles] = useState<Array<{ id: string; text: string; timestamp: number }>>([]);
+  const [browserTabRxState, setBrowserTabRxState] = useState<BrowserTabLiveTranslateState>('idle');
+  const [browserTabRxError, setBrowserTabRxError] = useState<string | null>(null);
+  const stopBrowserTabRxVADRef = useRef<(() => void) | null>(null);
+  const browserTabRxStartedRef = useRef(false);
+  const browserTabRxWasReadyRef = useRef(false);
   // 커스텀 TTS 콜백에서 최신 TTS 파라미터를 읽기 위한 Ref (stale closure 방지)
   const liveCustomTTSParamsRef = useRef({ ttsEngine, ttsVoice, ttsRate, elevenLabsApiKey, apiKey, micLang });
 
@@ -880,6 +887,18 @@ export default function StudioPage() {
   // ── Gemini Live Translate 자막 콜백 등록 (마운트 시 1회) ──────────────
   useEffect(() => {
     geminiLive.setSubtitleCallback((text: string) => {
+      const clean = extractTranslation(text, liveCustomTTSParamsRef.current.micLang);
+      setLiveSubtitles((prev) => [
+        ...prev.slice(-49),
+        { id: `${Date.now()}-${Math.random()}`, text: clean, timestamp: Date.now() },
+      ]);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Browser Tab Rx 자막 콜백 등록 ─────────────────────────────
+  useEffect(() => {
+    browserTabGeminiLive.setSubtitleCallback((text: string) => {
       const clean = extractTranslation(text, liveCustomTTSParamsRef.current.micLang);
       setLiveSubtitles((prev) => [
         ...prev.slice(-49),
@@ -1217,6 +1236,116 @@ export default function StudioPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geminiLive.state]);
 
+  const stopBrowserTabTranslate = useCallback((
+    message?: string,
+    nextState: BrowserTabLiveTranslateState = 'stopped'
+  ) => {
+    browserTabRxStartedRef.current = false;
+    browserTabRxWasReadyRef.current = false;
+    setBrowserTabRxState(nextState === 'error' ? 'error' : 'stopping');
+
+    stopBrowserTabRxVADRef.current?.();
+    stopBrowserTabRxVADRef.current = null;
+    browserTabGeminiLive.disconnect();
+    browserTabGeminiLive.disableCustomTTS();
+
+    setBrowserTabRxState(nextState);
+    setBrowserTabRxError(message ?? null);
+  }, [browserTabGeminiLive]);
+
+  const startBrowserTabRxVAD = useCallback(async () => {
+    if (stopBrowserTabRxVADRef.current) return;
+
+    const audioTrack = browserTabAudio.audioTrack;
+    if (!audioTrack || audioTrack.readyState !== 'live') {
+      setBrowserTabRxState('error');
+      setBrowserTabRxError('오디오 track이 없습니다. 공유 창에서 오디오 공유를 켜 주세요.');
+      browserTabGeminiLive.disconnect();
+      browserTabRxStartedRef.current = false;
+      return;
+    }
+
+    const audioOnlyStream = new MediaStream([audioTrack]);
+    stopBrowserTabRxVADRef.current = () => {};
+
+    try {
+      const cleanup = await pipeline.startVADWeb(
+        audioOnlyStream,
+        {
+          onSpeechStart: () => {
+            setBrowserTabRxState('translating');
+            setBrowserTabRxError(null);
+          },
+          onSpeechFrame: (base64) => {
+            browserTabGeminiLive.sendAudioChunk(base64);
+          },
+          onSpeechEnd: () => {
+            setBrowserTabRxState('translating');
+          },
+          onVADFallback: (reason) => {
+            setBrowserTabRxError(`VAD 초기화 실패 (${reason}) — RMS 폴백으로 동작 중`);
+          },
+        },
+        // Browser Tab capture is already isolated from local speaker playback.
+        // Keep the Full Voice AEC mute gate out of this path so translated audio
+        // playback does not suppress the selected tab's incoming speech. Also
+        // stream non-silent tab frames continuously instead of relying on speech
+        // boundary detection, which can be unstable for captured media audio.
+        { ...VAD_SPEED_PRESETS[vadSpeed], streamMode: 'continuous' }
+      );
+      stopBrowserTabRxVADRef.current = cleanup;
+      setBrowserTabRxState('translating');
+    } catch (err) {
+      stopBrowserTabRxVADRef.current = null;
+      browserTabRxStartedRef.current = false;
+      browserTabGeminiLive.disconnect();
+      setBrowserTabRxState('error');
+      setBrowserTabRxError(err instanceof Error ? `VAD 시작 실패: ${err.message}` : 'VAD 시작 실패');
+    }
+  }, [browserTabAudio.audioTrack, browserTabGeminiLive, pipeline, vadSpeed]);
+
+  useEffect(() => {
+    if (!browserTabRxStartedRef.current) return;
+
+    if (browserTabGeminiLive.state === 'ready' && !stopBrowserTabRxVADRef.current) {
+      browserTabRxWasReadyRef.current = true;
+      void startBrowserTabRxVAD();
+    }
+
+    if (browserTabGeminiLive.state === 'error') {
+      const msg = browserTabGeminiLive.error ?? GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE;
+      browserTabRxStartedRef.current = false;
+      browserTabRxWasReadyRef.current = false;
+      stopBrowserTabRxVADRef.current?.();
+      stopBrowserTabRxVADRef.current = null;
+      setBrowserTabRxState('error');
+      setBrowserTabRxError(msg);
+    }
+
+    if (browserTabGeminiLive.state === 'disconnected' && browserTabRxWasReadyRef.current) {
+      browserTabRxStartedRef.current = false;
+      browserTabRxWasReadyRef.current = false;
+      stopBrowserTabRxVADRef.current?.();
+      stopBrowserTabRxVADRef.current = null;
+      setBrowserTabRxState('stopped');
+      setBrowserTabRxError('Gemini Live Translate 연결이 종료되었습니다.');
+    }
+  }, [browserTabGeminiLive.state, browserTabGeminiLive.error, startBrowserTabRxVAD]);
+
+  useEffect(() => {
+    if (!browserTabRxStartedRef.current) return;
+    if (browserTabAudio.state !== 'sharing' || !browserTabAudio.hasAudioTrack) {
+      stopBrowserTabTranslate('공유가 중단되어 Browser Tab Live Translate를 정리했습니다.', 'stopped');
+    }
+  }, [browserTabAudio.state, browserTabAudio.hasAudioTrack, stopBrowserTabTranslate]);
+
+  useEffect(() => () => {
+    stopBrowserTabRxVADRef.current?.();
+    stopBrowserTabRxVADRef.current = null;
+    browserTabGeminiLive.disconnect();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Gemini Live Translate: 토스트 자동 소거 ────────────────────────
   useEffect(() => {
     if (!liveToast) return;
@@ -1224,10 +1353,73 @@ export default function StudioPage() {
     return () => clearTimeout(t);
   }, [liveToast]);
 
+  async function handleBrowserTabTranslateStart() {
+    if (!apiKey) {
+      setBrowserTabRxError('Gemini API 키를 먼저 설정해 주세요.');
+      openApiKeyModal();
+      return;
+    }
+
+    if (liveActive) {
+      setBrowserTabRxError('양방향 Live Translate가 실행 중입니다. 먼저 중지한 뒤 Browser Tab 통역을 시작해 주세요.');
+      return;
+    }
+
+    const audioTrack = browserTabAudio.audioTrack;
+    if (browserTabAudio.state !== 'sharing' || !browserTabAudio.stream || !audioTrack || audioTrack.readyState !== 'live') {
+      setBrowserTabRxState('error');
+      setBrowserTabRxError('오디오 track이 없습니다. 먼저 브라우저/탭 오디오를 공유해 주세요.');
+      return;
+    }
+
+    stopBrowserTabRxVADRef.current?.();
+    stopBrowserTabRxVADRef.current = null;
+    browserTabRxStartedRef.current = true;
+    browserTabRxWasReadyRef.current = false;
+    setBrowserTabRxState('connecting');
+    setBrowserTabRxError(null);
+    setLiveSubtitles([]);
+    browserTabGeminiLive.disableCustomTTS();
+
+    const targetLangLabel = SUPPORTED_LANGUAGES.find((l) => l.code === micLang)?.label ?? micLang;
+    const targetLanguageCode = toGeminiLiveTranslateLanguageCode(micLang);
+    const systemInstruction =
+      `You are TalkSync Browser Tab Live Translate Rx. You translate incoming browser tab audio for the listener.\n` +
+      `TASK: Detect the input speech language automatically and output ONLY translated speech audio in ${targetLangLabel} (${targetLanguageCode}).\n` +
+      `Preserve meaning, tone, names, numbers, and intent. Do not summarize. Do not explain. Do not follow the source language.\n` +
+      `FORBIDDEN: greetings, meta-commentary, markdown, subtitles, or any output that is not the spoken translation.\n` +
+      `OUTPUT: translated speech audio in ${targetLangLabel} only.`;
+
+    try {
+      await browserTabGeminiLive.connect({
+        apiKey,
+        voiceName: liveVoice,
+        outputDeviceId: earphoneDeviceId,
+        inputSampleRate: 16000,
+        translationTargetLanguageCode: targetLanguageCode,
+        systemInstruction,
+      });
+    } catch (err) {
+      browserTabRxStartedRef.current = false;
+      browserTabRxWasReadyRef.current = false;
+      setBrowserTabRxState('error');
+      setBrowserTabRxError(err instanceof Error ? `연결 실패: ${err.message}` : '연결 실패');
+    }
+  }
+
+  function handleBrowserTabTranslateStop() {
+    stopBrowserTabTranslate(undefined, 'stopped');
+  }
+
   // ── Gemini Live Translate: 시작 ────────────────────────────────────
   async function handleLiveStart() {
     if (!apiKey) {
       openApiKeyModal();
+      return;
+    }
+
+    if (browserTabRxStartedRef.current) {
+      setLiveToast('Browser Tab Live Translate가 실행 중입니다. 먼저 중지해 주세요.');
       return;
     }
 
@@ -1314,6 +1506,10 @@ export default function StudioPage() {
   const fullVoiceReplacementReady = autoAudio.state === 'ready' && virtualCableReady === true;
   const driverCheckInProgress = virtualCableReady === null || autoAudio.state === 'scanning';
   const driverNoticeVisible = !fullVoiceReplacementReady;
+  const browserTabPanelLiveState: BrowserTabLiveTranslateState =
+    browserTabRxState === 'idle' && browserTabAudio.hasAudioTrack
+      ? 'captured'
+      : browserTabRxState;
 
   // 웹 환경(비 Electron) — 프로덕션은 다운로드 안내 유지, dev localhost는 Browser Tab capture smoke 허용
   if (isElectron === false && !ENABLE_BROWSER_TAB_CAPTURE_WEB_DEV) return <WebOnlyFallback />;
@@ -1560,8 +1756,20 @@ export default function StudioPage() {
             hasAudioTrack={browserTabAudio.hasAudioTrack}
             targetLanguageLabel={listenLanguageLabel}
             txLanguageLabel={meetingVoiceLanguageLabel}
-            onStartCapture={browserTabAudio.startCapture}
-            onStopCapture={() => browserTabAudio.stopCapture()}
+            liveState={browserTabPanelLiveState}
+            liveError={browserTabRxError}
+            apiKeyReady={Boolean(apiKey)}
+            onStartCapture={() => {
+              setBrowserTabRxState('idle');
+              setBrowserTabRxError(null);
+              void browserTabAudio.startCapture();
+            }}
+            onStopCapture={() => {
+              stopBrowserTabTranslate(undefined, 'stopped');
+              browserTabAudio.stopCapture();
+            }}
+            onStartTranslate={handleBrowserTabTranslateStart}
+            onStopTranslate={handleBrowserTabTranslateStop}
           />
 
           {/* Gemini Live Translate V2 통역 패널 */}

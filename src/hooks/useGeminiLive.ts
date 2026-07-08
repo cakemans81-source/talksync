@@ -17,6 +17,7 @@ import { useRef, useCallback, useState, useEffect } from 'react';
 import { WavAccumulator, float32ToInt16Bytes } from '@/lib/wavExporter';
 import { isPhysicalOutputDevice, isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
 import {
+  GEMINI_LIVE_TRANSLATE_CONTEXT_WINDOW_COMPRESSION,
   GEMINI_LIVE_TRANSLATE_DISPLAY_NAME,
   GEMINI_LIVE_TRANSLATE_MODEL,
   GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE,
@@ -27,7 +28,7 @@ import {
 // Ref: https://ai.google.dev/api/multimodal-live
 // ─────────────────────────────────────────────────────────────────────────────
 const WS_ENDPOINT =
-  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent';
+  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 
 /** Gemini Live Translate API 출력 PCM 샘플레이트 (고정값) */
 const OUTPUT_SAMPLE_RATE = 24000;
@@ -51,6 +52,11 @@ export type GeminiLiveConfig = {
    * 예: "너는 전문 동시통역사다. 상대방의 말을 듣고 즉시 한국어로 번역하여 음성으로 출력하라."
    */
   systemInstruction?: string;
+  /**
+   * Gemini Live Translate 전용 출력 언어 코드.
+   * Raw WebSocket setup.generationConfig.translationConfig.targetLanguageCode로 전달한다.
+   */
+  translationTargetLanguageCode?: string;
   /**
    * 응답 음성 프리셋
    * 지원: 'Aoede' | 'Puck' | 'Charon' | 'Fenrir' | 'Kore' | 'Zephyr'
@@ -415,24 +421,35 @@ export function useGeminiLive() {
       ws.onopen = () => {
         reconnectCountRef.current = 0; // 연결 성공 → 재시도 카운터 초기화
         // ── Setup 메시지: 세션 초기화 ─────────────────────────
-        // response_modalities: ['AUDIO'] → 텍스트 없이 음성으로만 응답
-        // system_instruction → 통역사 역할 및 언어 지시
+        // responseModalities: ['AUDIO'] → 텍스트 없이 음성으로만 응답
+        // translationConfig is the primary Live Translation target-language path.
+        // systemInstruction remains only for role/behavior guidance.
+        const generationConfig = {
+          responseModalities: ['AUDIO'],
+          ...(config.translationTargetLanguageCode && {
+            translationConfig: {
+              targetLanguageCode: config.translationTargetLanguageCode,
+            },
+          }),
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: config.voiceName ?? 'Aoede',
+              },
+            },
+          },
+        };
+
+        const systemInstructionText = config.systemInstruction?.trim();
+
         const setupMsg = {
           setup: {
             model: config.model ?? GEMINI_LIVE_TRANSLATE_MODEL,
-            generation_config: {
-              response_modalities: ['AUDIO'],
-              speech_config: {
-                voice_config: {
-                  prebuilt_voice_config: {
-                    voice_name: config.voiceName ?? 'Aoede',
-                  },
-                },
-              },
-            },
-            ...(config.systemInstruction && {
-              system_instruction: {
-                parts: [{ text: config.systemInstruction }],
+            generationConfig,
+            contextWindowCompression: GEMINI_LIVE_TRANSLATE_CONTEXT_WINDOW_COMPRESSION,
+            ...(systemInstructionText && {
+              systemInstruction: {
+                parts: [{ text: systemInstructionText }],
               },
             }),
           },
@@ -440,16 +457,12 @@ export function useGeminiLive() {
         ws.send(JSON.stringify(setupMsg));
         console.log(`[GeminiLive] ${GEMINI_LIVE_TRANSLATE_DISPLAY_NAME} setup 전송 완료`);
 
-        // keepalive: 10초마다 빈 텍스트 턴 전송 → 서버 idle timeout 방지
-        if (keepaliveTimerRef.current) clearInterval(keepaliveTimerRef.current);
-        keepaliveTimerRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            // clientContent 표준 keepalive 패턴 (새 API 포맷 호환)
-            ws.send(JSON.stringify({
-              clientContent: { turns: [], turnComplete: false },
-            }));
-          }
-        }, 15000);
+        // Live API는 realtimeInput 오디오 스트림 자체가 세션 활동 신호다.
+        // 빈 clientContent keepalive는 일부 모델에서 invalid argument로 연결을 끊을 수 있다.
+        if (keepaliveTimerRef.current) {
+          clearInterval(keepaliveTimerRef.current);
+          keepaliveTimerRef.current = null;
+        }
       };
 
       ws.onmessage = (ev) => {
@@ -521,6 +534,8 @@ export function useGeminiLive() {
   //     onSpeechEnd: (chunk) => sendAudioChunk(chunk.base64),
   //   }, { muteUntilRef })
   const sendAudioChunk = useCallback((base64: string, inputSampleRate?: number) => {
+    if (!base64) return;
+
     // ── WAV 누적 (입력 스트림 — 마이크 방향) ──────────────────
     if (wavExportEnabledRef.current && wavInputAccRef.current) {
       // base64 → Int16 LE 바이트 직접 누적 (재디코딩 비용 제로)

@@ -49,6 +49,12 @@ export type VADCallbacks = {
 export type VADOptions = {
   /** TTS 재생 중에는 sys 오디오 무시 (AEC 게이트) */
   muteUntilRef?: MutableRefObject<number>;
+  /**
+   * speech: Silero 발화 구간 안에서만 frame 전송.
+   * continuous: 캡처 소스 RMS가 있는 동안 frame을 계속 전송.
+   * Browser Tab Translate처럼 이미 분리된 소스는 continuous가 더 안정적입니다.
+   */
+  streamMode?: 'speech' | 'continuous';
   /** 2차 RMS 에너지 게이트. 기본: 0.005 (숨소리 필터) */
   minRms?: number;
   /**
@@ -84,7 +90,7 @@ export type VADOptions = {
 // ∴ Silero 실패 시 T_rms = redemptionMs + 200ms (프리셋 의도 유지)
 const FALLBACK_BUFFER_MS = 200;
 export type VADPreset = 'fast' | 'balanced' | 'accurate';
-export const VAD_TRANSLATION_PRESETS: Record<VADPreset, Required<Omit<VADOptions, 'muteUntilRef'>>> = {
+export const VAD_TRANSLATION_PRESETS: Record<VADPreset, Required<Omit<VADOptions, 'muteUntilRef' | 'streamMode'>>> = {
   /**
    * 빠름: 짧은 문장, 즉각 반응
    * L_total ≈ 500 + 700ms = 1200ms ✓
@@ -203,6 +209,7 @@ export async function attachVAD(
 ): Promise<() => void> {
   const {
     muteUntilRef,
+    streamMode = 'speech',
     minRms = 0.005,
     redemptionMs = 700,
     negativeSpeechThreshold = 0.35,
@@ -211,6 +218,7 @@ export async function attachVAD(
     maxSpeechMs = 15000,
   } = options;
   const isMuted = () => muteUntilRef != null && Date.now() < muteUntilRef.current;
+  const shouldStreamContinuously = streamMode === 'continuous';
 
   try {
     const { MicVAD } = await import('@ricky0123/vad-web');
@@ -291,7 +299,24 @@ export async function attachVAD(
       // 발화 중 프레임별 오디오 수신 → 100ms 단위로 누적 후 전송
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       onFrameProcessed: (probs: any, frameAudio?: Float32Array) => {
-        if (!isSpeakingVAD || isMuted() || !callbacks.onSpeechFrame || !frameAudio) return;
+        if (isMuted() || !callbacks.onSpeechFrame || !frameAudio) return;
+
+        if (shouldStreamContinuously) {
+          const rms = Math.sqrt(frameAudio.reduce((s, v) => s + v * v, 0) / frameAudio.length);
+          if (rms < minRms) {
+            flushStreamBuffer();
+            if (isSpeakingVAD) callbacks.onSpeechEnd(toPcmChunk(new Float32Array(0)));
+            isSpeakingVAD = false;
+            return;
+          }
+          if (!isSpeakingVAD) {
+            isSpeakingVAD = true;
+            callbacks.onSpeechStart?.();
+          }
+        } else if (!isSpeakingVAD) {
+          return;
+        }
+
         streamFrameBuffer.push(frameAudio.slice(0));
         streamFrameSamples += frameAudio.length;
         if (streamFrameSamples >= STREAM_CHUNK_SAMPLES) {
