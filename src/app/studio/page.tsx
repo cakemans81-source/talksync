@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTranslationPipeline, type PipelineConfig } from '@/hooks/useTranslationPipeline';
 import { useGeminiLive } from '@/hooks/useGeminiLive';
@@ -14,6 +14,10 @@ import { BrowserTabTranslatePanel, type BrowserTabLiveTranslateState } from '@/c
 import { useAutoAudioSetup } from '@/hooks/useAutoAudioSetup';
 import { useBrowserTabAudioCapture } from '@/hooks/useBrowserTabAudioCapture';
 import { isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
+import {
+  evaluateIsolationHardGate,
+  isolationGateDisabledReason,
+} from '@/lib/isolationHardGate';
 import {
   TTS_VOICE_PRESETS, ELEVENLABS_VOICE_PRESETS, GEMINI_TTS_VOICE_PRESETS,
   fetchElevenLabsVoices, buildElevenLabsLabel,
@@ -395,7 +399,7 @@ function GeminiLivePanel({
                 연결 중...
               </>
             ) : disabled ? (
-              '드라이버 필요'
+              '격리 조건 미충족'
             ) : (
               <>
                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
@@ -1281,6 +1285,32 @@ export default function StudioPage() {
     stopBrowserTabTranslate(undefined, 'stopped');
   }
 
+  // ── P0 isolation hard-gate (device routing must protect AI-only claim)
+  const buildIsolationGateInput = useCallback(
+    () => ({
+      scanState: autoAudio.state,
+      bindingMode: autoAudio.bindingMode,
+      inputs: pipeline.devices.inputs,
+      outputs: pipeline.devices.outputs,
+      micDeviceId,
+      virtualMicDeviceId,
+      earphoneDeviceId,
+    }),
+    [
+      autoAudio.state,
+      autoAudio.bindingMode,
+      pipeline.devices.inputs,
+      pipeline.devices.outputs,
+      micDeviceId,
+      virtualMicDeviceId,
+      earphoneDeviceId,
+    ]
+  );
+  const isolationGate = useMemo(
+    () => evaluateIsolationHardGate(buildIsolationGateInput()),
+    [buildIsolationGateInput]
+  );
+
   // ── Gemini Live Translate: 시작 ────────────────────────────────────
   async function handleLiveStart() {
     if (!apiKey) {
@@ -1293,8 +1323,10 @@ export default function StudioPage() {
       return;
     }
 
-    if (earphoneDeviceId === 'default') {
-      setLiveToast('이어폰 장치를 먼저 선택해 주세요 — 하단 "이어폰 출력" 드롭다운을 확인하세요');
+    // Re-evaluate at click time so advanced-device overrides cannot bypass the button state
+    const gate = evaluateIsolationHardGate(buildIsolationGateInput());
+    if (!gate.ok) {
+      setLiveToast(isolationGateDisabledReason(gate));
       return;
     }
 
@@ -1373,9 +1405,12 @@ export default function StudioPage() {
     setLiveSubtitles([]);
   }
 
-  const fullVoiceReplacementReady = autoAudio.state === 'ready' && virtualCableReady === true;
+  // Isolation hard-gate is source of truth; virtualCableReady remains for banner timing only
+  const fullVoiceReplacementReady = isolationGate.ok && virtualCableReady !== false;
   const driverCheckInProgress = virtualCableReady === null || autoAudio.state === 'scanning';
   const driverNoticeVisible = !fullVoiceReplacementReady;
+  const isolationDisabledReason =
+    isolationGateDisabledReason(isolationGate) || '양방향 치환 모드는 드라이버 필요';
   const browserTabPanelLiveState: BrowserTabLiveTranslateState =
     browserTabRxState === 'idle' && browserTabAudio.hasAudioTrack
       ? 'captured'
@@ -1656,7 +1691,7 @@ export default function StudioPage() {
               liveError={null}
               liveCustomTTS={liveCustomTTS}
               disabled={!fullVoiceReplacementReady}
-              disabledReason="양방향 치환 모드는 드라이버 필요"
+              disabledReason={isolationDisabledReason}
               onStart={handleLiveStart}
               onStop={handleLiveStop}
               onVoiceChange={setLiveVoice}
@@ -1665,6 +1700,48 @@ export default function StudioPage() {
               onVadSpeedChange={setVadSpeed}
             />
           </div>
+
+          {/* P0 isolation preflight checklist */}
+          {!liveActive && (
+            <div className="mb-4 rounded-2xl border border-zinc-200 bg-white px-4 py-3">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <p className="text-xs font-semibold text-zinc-700">원음 격리 사전 점검 (P0)</p>
+                <span
+                  className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
+                    isolationGate.ok
+                      ? 'bg-emerald-50 text-emerald-700'
+                      : 'bg-amber-50 text-amber-700'
+                  }`}
+                >
+                  {isolationGate.ok ? '통과' : '차단'}
+                </span>
+              </div>
+              <ul className="space-y-1.5">
+                {isolationGate.checks.map((check) => (
+                  <li key={check.id} className="flex items-start gap-2 text-[11px] leading-relaxed">
+                    <span className={check.pass ? 'text-emerald-600' : 'text-amber-600'}>
+                      {check.pass ? '✓' : '○'}
+                    </span>
+                    <span className={check.pass ? 'text-zinc-600' : 'text-zinc-800 font-medium'}>
+                      {check.label}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {!isolationGate.ok && isolationGate.blockers.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-zinc-100 space-y-1">
+                  {isolationGate.blockers.slice(0, 3).map((b) => (
+                    <p key={b.code} className="text-[11px] text-amber-700 leading-relaxed">
+                      · {b.message}
+                    </p>
+                  ))}
+                </div>
+              )}
+              <p className="mt-2 text-[10px] text-zinc-400 leading-relaxed">
+                Browser Tab 듣기 모드는 드라이버 없이 가능합니다. 양방향 치환(상대에게 AI 음성만 송출)만 이 게이트를 통과해야 시작합니다.
+              </p>
+            </div>
+          )}
 
           {/* ── 오디오 자동 설정 패널 ── */}
           <div className="flex items-center justify-between gap-4 flex-wrap">
