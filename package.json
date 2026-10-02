@@ -11,6 +11,7 @@
     "build:web": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "node src/lib/isolationHardGate.test.mjs && node src/lib/rmsVadEngine.test.mjs",
     "electron:compile": "tsc -p electron/tsconfig.json",
     "electron:launch": "node -e \"const e={...process.env};delete e.ELECTRON_RUN_AS_NODE;require('child_process').execFileSync(require('electron'),['.'],{stdio:'inherit',env:e})\"",
     "electron:dev": "concurrently -n NEXT,ELECTRON -c cyan,yellow \"npm run dev\" \"wait-on http://localhost:3000 && npm run electron:compile && npm run electron:launch\"",
@@ -22,15 +23,13 @@
     "sign:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sign-win.ps1",
     "verify:win-signatures": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-win-signatures.ps1",
     "build:win-release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win-release.ps1",
-    "deploy": "git add -A && git commit -m \"deploy: $(date '+%Y-%m-%d %H:%M')\" && git push origin main"
+    "deploy": "git add -u && git commit -m \"deploy: $(date '+%Y-%m-%d %H:%M')\" && git push origin main"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@ricky0123/vad-web": "^0.0.30",
-    "@supabase/ssr": "^0.9.0",
     "@supabase/supabase-js": "^2.99.3",
     "next": "16.2.0",
-    "next-intl": "^4.8.3",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
@@ -89,7 +88,7 @@
         }
       ],
       "icon": "build/icon.ico",
-      "artifactName": "TalkSync-Setup-${version}.exe",
+      "artifactName": "TalkSync-Setup.exe",
       "signtoolOptions": {
         "sign": "./scripts/electron-builder-sign-win.cjs",
         "signingHashAlgorithms": [
@@ -110,8 +109,7 @@
     },
     "mac": {
       "target": "dmg",
-      "category": "public.app-category.utilities",
-      "icon": "build/icon.ico"
+      "category": "public.app-category.utilities"
     },
     "linux": {
       "target": "AppImage"

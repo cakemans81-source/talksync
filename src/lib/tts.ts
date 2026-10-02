@@ -1,32 +1,12 @@
 'use client';
 
 // ─────────────────────────────────────────────
-// TTS — Microsoft Edge TTS (Azure Neural)
-// WebSocket 방식 — API 키 불필요, 무제한 사용
-// 출력: MP3 (audio-24khz-48kbitrate-mono-mp3)
+// TTS 합성 — 프리미엄 모드(커스텀 TTS)용 엔진 3종
+//   - Edge TTS (Azure Neural, WebSocket, API 키 불필요) → MP3
+//   - ElevenLabs (eleven_multilingual_v2, API 키 필요)   → MP3
+//   - Gemini TTS (gemini-2.5-flash-preview-tts)          → WAV
+// 모두 ArrayBuffer를 반환하고, 재생/라우팅은 호출 측이 담당한다.
 // ─────────────────────────────────────────────
-
-export type TTSVoicePreset = {
-  id: string;      // Edge TTS voice name (SSML 파라미터)
-  label: string;   // UI 표시 이름
-  gender: 'female' | 'male';
-};
-
-// Edge TTS Neural 보이스 프리셋
-export const TTS_VOICE_PRESETS: TTSVoicePreset[] = [
-  { id: 'ko-KR-SunHiNeural',    label: '한국어 여성 — SunHi',    gender: 'female' },
-  { id: 'ko-KR-InJoonNeural',   label: '한국어 남성 — InJoon',   gender: 'male'   },
-  { id: 'en-US-JennyNeural',    label: '영어 여성 — Jenny',      gender: 'female' },
-  { id: 'en-US-GuyNeural',      label: '영어 남성 — Guy',        gender: 'male'   },
-  { id: 'ja-JP-NanamiNeural',   label: '일본어 여성 — Nanami',   gender: 'female' },
-  { id: 'ja-JP-KeitaNeural',    label: '일본어 남성 — Keita',    gender: 'male'   },
-  { id: 'zh-CN-XiaoxiaoNeural', label: '중국어 여성 — Xiaoxiao', gender: 'female' },
-  { id: 'zh-CN-YunxiNeural',    label: '중국어 남성 — Yunxi',    gender: 'male'   },
-  { id: 'fr-FR-DeniseNeural',   label: '프랑스어 여성 — Denise', gender: 'female' },
-  { id: 'de-DE-KatjaNeural',    label: '독일어 여성 — Katja',    gender: 'female' },
-  { id: 'es-ES-ElviraNeural',   label: '스페인어 여성 — Elvira', gender: 'female' },
-  { id: 'vi-VN-HoaiMyNeural',   label: '베트남어 여성 — HoaiMy', gender: 'female' },
-];
 
 // 언어 코드 → Edge TTS 기본 보이스
 export function defaultEdgeVoiceForLang(langCode: string): string {
@@ -139,25 +119,10 @@ export async function synthesizeEdgeTTS(
     };
 
     ws.onerror = () => done(null);
-    ws.onclose = () => { /* done()은 이미 호출됨 */ };
+    // 정상 경로는 turn.end에서 done()이 먼저 호출됨 (close 이벤트는 비동기).
+    // turn.end 전에 서버가 끊으면 15초 타임아웃까지 기다리지 않고 즉시 null 반환.
+    ws.onclose = () => done(null);
   });
-}
-
-// ── TTS 중단 (브라우저 TTS 폴백용) ────────────
-export function stopTTS(): void {
-  if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
-}
-
-// ── 브라우저 내장 TTS (Edge TTS 실패 시 폴백) ──
-export function speakBrowserTTS(text: string, langCode: string, rate = 1.0): void {
-  if (!text.trim() || typeof window === 'undefined') return;
-  const synth = window.speechSynthesis;
-  if (!synth) return;
-  synth.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = langCode;
-  utterance.rate = rate;
-  synth.speak(utterance);
 }
 
 // ─────────────────────────────────────────────
@@ -248,16 +213,6 @@ export async function synthesizeElevenLabsTTS(
 // ── Gemini TTS ────────────────────────────────
 // gemini-2.5-flash-preview-tts — API 키 필요, 다국어 지원
 // PCM LINEAR16(24kHz) 반환 → WAV 컨테이너로 래핑하여 AudioContext에서 디코딩
-export const GEMINI_TTS_VOICE_PRESETS = [
-  { id: 'Aoede',  label: 'Aoede — 여성, 밝음'  },
-  { id: 'Puck',   label: 'Puck — 남성, 활기참' },
-  { id: 'Charon', label: 'Charon — 남성, 중후함' },
-  { id: 'Kore',   label: 'Kore — 여성, 차분'   },
-  { id: 'Fenrir', label: 'Fenrir — 남성, 강렬함' },
-  { id: 'Leda',   label: 'Leda — 여성, 부드러움' },
-  { id: 'Orus',   label: 'Orus — 남성, 안정적'  },
-  { id: 'Zephyr', label: 'Zephyr — 중성, 자연스러움' },
-];
 
 // PCM LINEAR16 raw bytes → WAV file ArrayBuffer
 function pcmToWav(pcm: ArrayBuffer, sampleRate = 24000, channels = 1, bitsPerSample = 16): ArrayBuffer {

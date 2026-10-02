@@ -31,7 +31,7 @@ The important Windows artifacts are:
 - any other `.exe` discovered under `dist-electron\win-unpacked`
 - `dist-electron\win-unpacked\resources\elevate.exe`, if electron-builder emits
   it for the current NSIS build
-- `dist-electron\TalkSync-Setup-*.exe`
+- `dist-electron\TalkSync-Setup*.exe`
 - installed `Uninstall TalkSync.exe`, verified after running the installer
 
 Electron runtime DLLs are not first-pass signing targets in this project. They
@@ -122,7 +122,7 @@ To sign specific files manually:
   -TimestampUrl "http://timestamp.digicert.com" `
   -Files @(
     "dist-electron\win-unpacked\TalkSync.exe",
-    "dist-electron\TalkSync-Setup-0.1.0.exe"
+    "dist-electron\TalkSync-Setup.exe"
   )
 ```
 
@@ -142,7 +142,7 @@ switches:
 npm run sign:win -- -- `
   -DryRun `
   -Thumbprint "0000000000000000000000000000000000000000" `
-  -Files "dist-electron\win-unpacked\TalkSync.exe,dist-electron\TalkSync-Setup-0.1.0.exe"
+  -Files "dist-electron\win-unpacked\TalkSync.exe,dist-electron\TalkSync-Setup.exe"
 ```
 
 ## Verify Signatures

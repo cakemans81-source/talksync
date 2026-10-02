@@ -6,13 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 // createBrowserClient(쿠키 기반)는 세션이 유지되지 않음
 // ─────────────────────────────────────────────
 
-export type ProfileRow = {
-  id: string;
-  encrypted_gemini_key: string | null;
-  created_at: string;
-};
-
-export function createSupabaseClient() {
+function createSupabaseClient() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!

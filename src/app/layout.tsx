@@ -30,6 +30,8 @@ export default function RootLayout({
       className={`${manrope.variable} ${beVietnamPro.variable} h-full antialiased`}
     >
       <head>
+        {/* Material Symbols 아이콘 폰트 — App Router 루트 레이아웃이라 전 페이지 공통 적용됨 (Pages Router 전용 규칙 오탐) */}
+        {/* eslint-disable-next-line @next/next/no-page-custom-font */}
         <link
           rel="stylesheet"
           href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap"

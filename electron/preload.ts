@@ -16,13 +16,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.send('open-external', url);
   },
 
-  // Windows SAPI TTS: 텍스트 → WAV ArrayBuffer
-  synthesizeTTS: (text: string, lang: string): Promise<ArrayBuffer | null> =>
-    ipcRenderer.invoke('synthesize-tts', text, lang).then((buf: Buffer | null) => {
-      if (!buf) return null;
-      return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-    }),
-
   // OAuth 딥링크 콜백 수신 (talksync://auth/callback?code=...)
   onOAuthCallback: (callback: (url: string) => void): (() => void) => {
     const handler = (_: IpcRendererEvent, url: string) => callback(url);
@@ -30,12 +23,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 클린업 함수 반환
     return () => ipcRenderer.removeListener('oauth-callback', handler);
   },
-
-  // Windows 기본 오디오 출력 → CABLE-B 전환 & 원본 복원
-  enableCableRouting: (): Promise<{ ok: boolean; reason?: string }> =>
-    ipcRenderer.invoke('audio:enable-cable-routing'),
-  disableCableRouting: (): Promise<{ ok: boolean; reason?: string }> =>
-    ipcRenderer.invoke('audio:disable-cable-routing'),
 
   // WAV 파일 저장 (wavExporter.ts → main 프로세스 → Downloads/TalkSync/)
   // ArrayBuffer 직접 전달 — Uint8Array/Buffer로 자동 변환됨

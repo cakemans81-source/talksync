@@ -11,6 +11,7 @@
  */
 
 import type { MutableRefObject } from 'react';
+import { createRmsVadEngine } from './rmsVadEngine';
 
 // ── CDN 에셋 경로 (로컬 app:// 서빙 에러 우회) ───────────────────────────
 // Electron app:// 프로토콜에서 WASM Module Worker 로드 실패 → JSDelivr CDN으로 대체
@@ -75,11 +76,13 @@ export type VADOptions = {
   /**
    * RMS 폴백 침묵 판단 시간 (ms). 기본: redemptionMs + 200ms
    * 핵심 공식: rmsTimeoutMs > redemptionMs → Silero가 항상 먼저 실행됨
+   * (RMS 폴백 전용 — Silero 경로는 redemptionMs 사용)
    */
   rmsTimeoutMs?: number;
   /**
    * 무한 발화 방지 하드 캡 (ms). 기본: 15000ms
    * 이 시간 초과 시 강제 EoT → Gemini 응답 보장
+   * (RMS 폴백 전용)
    */
   maxSpeechMs?: number;
 };
@@ -131,35 +134,6 @@ export const VAD_TRANSLATION_PRESETS: Record<VADPreset, Required<Omit<VADOptions
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 듀얼 스트림 믹서
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * 두 개의 MediaStream을 하나로 믹싱합니다.
- * Web Audio API: srcA + srcB → MediaStreamDestinationNode → mixed stream
- *
- * @param streamA 물리 마이크 스트림
- * @param streamB 화상회의 수신 스트림 (TalkSync Rx)
- * @returns { mixed: MediaStream, cleanup: () => void }
- */
-export function mixStreams(
-  streamA: MediaStream,
-  streamB: MediaStream,
-): { mixed: MediaStream; cleanup: () => void } {
-  const ctx = new AudioContext({ sampleRate: 16000 });
-  const srcA = ctx.createMediaStreamSource(streamA);
-  const srcB = ctx.createMediaStreamSource(streamB);
-  const dest = ctx.createMediaStreamDestination();
-  srcA.connect(dest);
-  srcB.connect(dest);
-  if (ctx.state === 'suspended') ctx.resume();
-  return {
-    mixed: dest.stream,
-    cleanup: () => { try { ctx.close(); } catch { /* 이미 종료됨 */ } },
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // PCM 변환 유틸리티
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -167,7 +141,7 @@ export function mixStreams(
  * Float32 PCM [-1, 1] → Int16 LE PCM → Base64
  * Gemini Live API: inline_data { mime_type: "audio/pcm;rate=16000", data: base64 }
  */
-export function float32ToBase64Pcm(float32: Float32Array): string {
+function float32ToBase64Pcm(float32: Float32Array): string {
   const int16 = new Int16Array(float32.length);
   for (let i = 0; i < float32.length; i++) {
     const clamped = Math.max(-1, Math.min(1, float32[i]));
@@ -214,17 +188,20 @@ export async function attachVAD(
     redemptionMs = 700,
     negativeSpeechThreshold = 0.35,
     minSpeechMs = 300,
-    rmsTimeoutMs = redemptionMs + 200, // 동적 공식: 항상 Silero보다 200ms 늘게
+    // RMS 폴백 전용 (Silero 경로는 redemptionMs/minSpeechMs 사용)
+    rmsTimeoutMs = redemptionMs + FALLBACK_BUFFER_MS,
     maxSpeechMs = 15000,
   } = options;
   const isMuted = () => muteUntilRef != null && Date.now() < muteUntilRef.current;
   const shouldStreamContinuously = streamMode === 'continuous';
 
+  let vadCtx: AudioContext | null = null;
   try {
     const { MicVAD } = await import('@ricky0123/vad-web');
 
     // AudioContext를 외부에서 생성하여 주입 → start() 후 강제 resume 가능
-    const vadCtx = new AudioContext();
+    vadCtx = new AudioContext();
+    const ownCtx = vadCtx;
 
     // ── 실시간 스트리밍: 100ms(1600샘플 @ 16kHz) 단위로 전송 ──────
     const STREAM_CHUNK_SAMPLES = 1600; // 16000Hz × 0.1s
@@ -244,7 +221,7 @@ export async function attachVAD(
 
     const vad = await MicVAD.new({
       // 기존 캡처된 스트림을 사용 (mic 새 캡처 X)
-      audioContext: vadCtx,
+      audioContext: ownCtx,
       getStream: async () => stream,
       pauseStream: async () => {},
       resumeStream: async (s) => s,
@@ -330,21 +307,30 @@ export async function attachVAD(
 
     // ── AudioContext 강제 resume ──────────────────────────────────────────
     // 브라우저/Electron 자동재생 방지 정책으로 suspended 상태로 시작될 수 있음
-    if (vadCtx.state === 'suspended') {
-      await vadCtx.resume();
+    if (ownCtx.state === 'suspended') {
+      await ownCtx.resume();
       console.log('[VAD] AudioContext 강제 resume ✓');
     }
-    console.log('[VAD] Silero VAD 초기화 성공 ✓ (AudioContext state:', vadCtx.state, ')');
+    console.log('[VAD] Silero VAD 초기화 성공 ✓ (AudioContext state:', ownCtx.state, ')');
 
     return async () => {
       try { await vad.destroy(); } catch { /* 이미 종료됨 */ }
-      try { await vadCtx.close(); } catch { /* 이미 종료됨 */ }
+      try { await ownCtx.close(); } catch { /* 이미 종료됨 */ }
     };
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.warn('[VAD] Silero 초기화 실패 → RMS 폴백:', reason);
+    // Silero 초기화 중 생성된 AudioContext 누수 방지
+    vadCtx?.close().catch(() => {});
     callbacks.onVADFallback?.(reason);
-    return attachRmsVAD(stream, callbacks, { muteUntilRef, minRms });
+    return attachRmsVAD(stream, callbacks, {
+      muteUntilRef,
+      streamMode,
+      minRms,
+      rmsTimeoutMs,
+      minSpeechMs,
+      maxSpeechMs,
+    });
   }
 }
 
@@ -352,23 +338,36 @@ export async function attachVAD(
 // RMS 기반 폴백 VAD
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** RMS 폴백 오디오 블록 크기 (샘플) — 16kHz 기준 64ms */
+const RMS_BLOCK_SAMPLES = 1024;
+
 /**
  * WebAssembly 없이 동작하는 RMS 기반 VAD 폴백.
- * 침묵 1초 후 발화 종료로 판단, 발화 구간 PCM을 합산하여 PcmChunk로 반환.
+ *
+ * ScriptProcessorNode(오디오 스레드)가 겹치지 않는 연속 PCM 블록을 전달 → 각 샘플은 한 번만 전송.
+ * requestAnimationFrame/타이머를 쓰지 않으므로 창 최소화/백그라운드에서도 멈추지 않는다.
+ * (ScriptProcessorNode는 deprecated지만 Chromium/Electron에서 안정적으로 동작하고,
+ *  app:// + COOP/COEP 환경에서 AudioWorklet 모듈 로드 리스크가 없다.)
+ *
+ * - batch(onSpeechFrame 없음): rmsTimeoutMs 침묵 후 발화 구간 PCM을 onSpeechEnd로 전달
+ * - streaming(onSpeechFrame 있음): 100ms 단위 onSpeechFrame + 빈 onSpeechEnd (Silero 경로와 동일한 계약)
+ * - streamMode 'continuous': RMS ≥ minRms 블록을 계속 스트리밍 (Browser Tab Rx)
  */
 function attachRmsVAD(
   stream: MediaStream,
   callbacks: VADCallbacks,
   options: {
     muteUntilRef?: MutableRefObject<number>;
+    streamMode?: 'speech' | 'continuous';
     minRms?: number;
-    rmsTimeoutMs?: number;   // 동적 침리 판단 시간 (항상 redemptionMs+200ms)
+    rmsTimeoutMs?: number;   // 침묵 판단 시간 (프리셋: redemptionMs + 200ms)
     minSpeechMs?: number;    // 최소 발화 인정 시간
-    maxSpeechMs?: number;    // 무한 발화 하드 켜
+    maxSpeechMs?: number;    // 무한 발화 하드 캡
   } = {}
 ): () => void {
   const {
     muteUntilRef,
+    streamMode = 'speech',
     minRms = 0.01,
     rmsTimeoutMs = 900,   // balanced 기본: 700+200
     minSpeechMs = 300,
@@ -376,129 +375,56 @@ function attachRmsVAD(
   } = options;
   const isMuted = () => muteUntilRef != null && Date.now() < muteUntilRef.current;
 
-  const SILENCE_MS = rmsTimeoutMs; // 동적 적용 (500ms 하드코딩 제거)
   const SAMPLE_RATE = 16000;
+
+  const engine = createRmsVadEngine(
+    {
+      sampleRate: SAMPLE_RATE,
+      minRms,
+      rmsTimeoutMs,
+      minSpeechMs,
+      maxSpeechMs,
+      streamMode,
+      streaming: Boolean(callbacks.onSpeechFrame),
+      chunkSamples: SAMPLE_RATE / 10, // 100ms — Silero 경로 STREAM_CHUNK_SAMPLES와 동일
+    },
+    {
+      onSpeechStart: () => callbacks.onSpeechStart?.(),
+      onSpeechEnd: (audio) => callbacks.onSpeechEnd(toPcmChunk(audio)),
+      onSpeechFrame: (pcm) => callbacks.onSpeechFrame?.(float32ToBase64Pcm(pcm)),
+    }
+  );
 
   const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
   const src = ctx.createMediaStreamSource(stream);
-  const analyser = ctx.createAnalyser();
-  analyser.fftSize = 2048;
-  src.connect(analyser);
+  const processor = ctx.createScriptProcessor(RMS_BLOCK_SAMPLES, 1, 1);
+  // ScriptProcessor는 destination에 연결돼야 onaudioprocess가 호출된다.
+  // 출력은 gain 0으로 무음 처리 (어떤 출력 장치로도 소리가 나가지 않음).
+  const silentSink = ctx.createGain();
+  silentSink.gain.value = 0;
 
-  const buf = new Float32Array(analyser.fftSize);
-  let silenceStart: number | null = null;
-  let isSpeaking = false;
-  let speechBuffer: Float32Array[] = [];
-  let speechStartTime = 0;
-  let rafId: number;
-  let maxSpeechTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const check = () => {
-    analyser.getFloatTimeDomainData(buf);
-    const rms = Math.sqrt(buf.reduce((s, v) => s + v * v, 0) / buf.length);
-    const now = Date.now();
-
-    if (isMuted()) {
-      // AEC 게이트 활성화 — 버퍼 초기화
-      silenceStart = null;
-      isSpeaking = false;
-      speechBuffer = [];
-      rafId = requestAnimationFrame(check);
-      return;
-    }
-
-    if (rms >= minRms) {
-      if (!isSpeaking) {
-        isSpeaking = true;
-        speechStartTime = Date.now();
-        callbacks.onSpeechStart?.();
-        // 하드 켜: 무한 발화 방지
-        if (maxSpeechTimer) clearTimeout(maxSpeechTimer);
-        maxSpeechTimer = setTimeout(() => {
-          if (!isSpeaking) return;
-          isSpeaking = false;
-          silenceStart = null;
-          const total = speechBuffer.reduce((s, b) => s + b.length, 0);
-          const combined = new Float32Array(total);
-          let offset = 0;
-          for (const b of speechBuffer) { combined.set(b, offset); offset += b.length; }
-          speechBuffer = [];
-          console.warn('[RMS VAD] maxSpeechMs 도달 → 강제 EoT');
-          callbacks.onSpeechEnd(toPcmChunk(combined));
-        }, maxSpeechMs);
-      }
-      silenceStart = null;
-      speechBuffer.push(buf.slice(0));
-    } else if (isSpeaking) {
-      if (silenceStart === null) {
-        silenceStart = now;
-      } else if (now - silenceStart >= SILENCE_MS) {
-        isSpeaking = false;
-        if (maxSpeechTimer) { clearTimeout(maxSpeechTimer); maxSpeechTimer = null; }
-
-        // minSpeechMs 게이트: 기침/잡음 제거
-        const speechDuration = silenceStart - speechStartTime;
-        if (speechDuration < minSpeechMs) {
-          speechBuffer = [];
-          silenceStart = null;
-          rafId = requestAnimationFrame(check);
-          return;
-        }
-
-        const total = speechBuffer.reduce((s, b) => s + b.length, 0);
-        const combined = new Float32Array(total);
-        let offset = 0;
-        for (const b of speechBuffer) { combined.set(b, offset); offset += b.length; }
-        speechBuffer = [];
-        silenceStart = null;
-        callbacks.onSpeechEnd(toPcmChunk(combined));
-      }
-    }
-
-    rafId = requestAnimationFrame(check);
+  let stopped = false;
+  processor.onaudioprocess = (ev) => {
+    if (stopped) return;
+    engine.process(ev.inputBuffer.getChannelData(0), isMuted());
   };
 
-  rafId = requestAnimationFrame(check);
-  console.log('[VAD] RMS 폴백 VAD 시작');
+  src.connect(processor);
+  processor.connect(silentSink);
+  silentSink.connect(ctx.destination);
+
+  if (ctx.state === 'suspended') {
+    ctx.resume().catch(() => {});
+  }
+  console.log('[VAD] RMS 폴백 VAD 시작 (streamMode:', streamMode, ')');
 
   return () => {
-    cancelAnimationFrame(rafId);
-    if (maxSpeechTimer) clearTimeout(maxSpeechTimer);
-    src.disconnect();
-    ctx.close();
+    stopped = true;
+    processor.onaudioprocess = null;
+    engine.reset();
+    try { src.disconnect(); } catch { /* 이미 해제됨 */ }
+    try { processor.disconnect(); } catch { /* 이미 해제됨 */ }
+    try { silentSink.disconnect(); } catch { /* 이미 해제됨 */ }
+    ctx.close().catch(() => {});
   };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PcmChunk 버퍼 (Gemini Live API 전송용 슬라이딩 윈도우)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * 수신된 PcmChunk를 FIFO 버퍼에 쌓고 maxLength 초과 시 오래된 항목 제거.
- * Gemini Live API 스트리밍 세션에서 최근 N개 청크를 관리할 때 사용.
- */
-export class PcmChunkBuffer {
-  private buffer: PcmChunk[] = [];
-
-  constructor(private readonly maxLength = 50) {}
-
-  push(chunk: PcmChunk): void {
-    this.buffer.push(chunk);
-    if (this.buffer.length > this.maxLength) this.buffer.shift();
-  }
-
-  /** 모든 청크 반환 (시간순) */
-  getAll(): readonly PcmChunk[] { return this.buffer; }
-
-  /** 가장 최근 청크 */
-  getLast(): PcmChunk | undefined { return this.buffer[this.buffer.length - 1]; }
-
-  /** 특정 timestamp 이후 청크만 반환 */
-  getSince(sinceTimestamp: number): PcmChunk[] {
-    return this.buffer.filter((c) => c.timestamp > sinceTimestamp);
-  }
-
-  clear(): void { this.buffer = []; }
-
-  get size(): number { return this.buffer.length; }
 }

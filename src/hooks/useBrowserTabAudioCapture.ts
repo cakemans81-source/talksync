@@ -69,12 +69,23 @@ export function useBrowserTabAudioCapture() {
     sourceRef.current = source;
 
     const samples = new Float32Array(analyser.fftSize);
+    // 소비자 리렌더 억제: 최대 ~15회/초, 그리고 의미 있는 변화(≥0.02)일 때만 setLevel
+    const LEVEL_MIN_INTERVAL_MS = 66;
+    const LEVEL_MIN_DELTA = 0.02;
+    let lastEmitted = 0;
+    let lastEmitAt = 0;
     const tick = () => {
       if (!analyserRef.current) return;
       analyserRef.current.getFloatTimeDomainData(samples);
       let sum = 0;
       for (let i = 0; i < samples.length; i += 1) sum += samples[i] * samples[i];
-      setLevel(Math.min(1, Math.sqrt(sum / samples.length) * 6));
+      const next = Math.round(Math.min(1, Math.sqrt(sum / samples.length) * 6) * 100) / 100;
+      const now = performance.now();
+      if (now - lastEmitAt >= LEVEL_MIN_INTERVAL_MS && Math.abs(next - lastEmitted) >= LEVEL_MIN_DELTA) {
+        lastEmitted = next;
+        lastEmitAt = now;
+        setLevel(next);
+      }
       levelRafRef.current = requestAnimationFrame(tick);
     };
 
@@ -96,6 +107,7 @@ export function useBrowserTabAudioCapture() {
     setError(null);
 
     try {
+      // video 트랙은 세션 동안 의도적으로 유지 — Chrome에서 video를 stop하면 공유가 끝나며 탭 오디오도 함께 끊길 수 있음
       const captured = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: {

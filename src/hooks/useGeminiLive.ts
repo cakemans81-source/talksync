@@ -14,7 +14,7 @@
  */
 
 import { useRef, useCallback, useState, useEffect } from 'react';
-import { WavAccumulator, float32ToInt16Bytes } from '@/lib/wavExporter';
+import { WavAccumulator } from '@/lib/wavExporter';
 import { isPhysicalOutputDevice, isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
 import {
   GEMINI_LIVE_TRANSLATE_CONTEXT_WINDOW_COMPRESSION,
@@ -29,6 +29,10 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 const WS_ENDPOINT =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
+
+/** TalkSync Tx setSinkId 실패 시 txError 메시지 */
+const GEMINI_LIVE_TX_SINK_FAILED_MESSAGE =
+  '회의방 송출 장치(TalkSync Virtual Microphone) 연결 실패 — 상대방에게 번역 음성이 전달되지 않습니다';
 
 /** Gemini Live Translate API 출력 PCM 샘플레이트 (고정값) */
 const OUTPUT_SAMPLE_RATE = 24000;
@@ -135,6 +139,22 @@ function base64PcmToFloat32(base64: string): Float32Array {
   return float32;
 }
 
+/** 이미 연결(중)인 세션과 다른 config로 connect()가 호출되면 경고 (세션은 유지, apiKey 값은 출력하지 않음) */
+function warnIfConfigDiffers(current: GeminiLiveConfig | null, next: GeminiLiveConfig) {
+  if (!current) return;
+  const keys = new Set([...Object.keys(current), ...Object.keys(next)] as Array<keyof GeminiLiveConfig>);
+  // muteLocalOutput은 setMonitorOutput()으로 런타임 변경되므로 비교에서 제외
+  keys.delete('muteLocalOutput');
+  const differs = [...keys].filter((k) => current[k] !== next[k]);
+  if (differs.length > 0) {
+    console.warn(
+      '[GeminiLive] connect() 무시 — 이미 연결(중)인 세션의 설정을 유지합니다. 다른 키:',
+      differs.join(', '),
+      '— 설정을 바꾸려면 disconnect() 후 connect() 하세요.'
+    );
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // useGeminiLive Hook
 // ─────────────────────────────────────────────────────────────────────────────
@@ -164,8 +184,15 @@ export function useGeminiLive() {
   const reconnectCountRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const intentionalDisconnectRef = useRef(false); // 의도적 종료 플래그
+  // 재연결 타이머가 최신 connect를 호출하기 위한 Ref (connect의 자기 참조 회피)
+  const connectRef = useRef<((config: GeminiLiveConfig) => Promise<void>) | null>(null);
   // keepalive ping 타이머
   const keepaliveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // connect() 세대 카운터 — disconnect()/새 connect() 시 증가.
+  // await 도중 세대가 바뀌면 진행 중이던 connect는 소켓을 만들지 않고 종료한다.
+  const connectSeqRef = useRef(0);
+  // 진행 중인 connect() Promise — 중복 호출 시 같은 Promise를 반환 (소켓 이중 생성 방지)
+  const connectPromiseRef = useRef<Promise<void> | null>(null);
 
   const earphoneSinkReadyRef = useRef<boolean>(true);
 
@@ -190,6 +217,8 @@ export function useGeminiLive() {
 
   const [state, setState] = useState<GeminiLiveState>('disconnected');
   const [error, setError] = useState<string | null>(null);
+  // TalkSync Tx(회의방 송출) 경로 실패 — 세션은 'ready'로 계속되지만 상대방에게 번역 음성이 전달되지 않음
+  const [txError, setTxError] = useState<string | null>(null);
 
   // ── AudioContext 지연 초기화 ────────────────────────────────
   // 브라우저 AutoPlay 정책: 사용자 제스처(버튼 클릭) 이후에만 생성 가능
@@ -383,16 +412,19 @@ export function useGeminiLive() {
   );
 
   // ── WebSocket 연결 & Setup 메시지 전송 ──────────────────────
-  const connect = useCallback(
-    async (config: GeminiLiveConfig) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) return;
+  const connectImpl = useCallback(
+    async (config: GeminiLiveConfig, seq: number) => {
+      // 이 connect() 호출이 여전히 최신인지 (disconnect()/새 connect()로 무효화되지 않았는지)
+      const isStale = () => connectSeqRef.current !== seq;
 
       configRef.current = config;
       setState('connecting');
       setError(null);
+      setTxError(null);
 
       // AudioContext 미리 초기화 (재생 장치 라우팅 포함)
       const ctx = await getCtx(config.outputDeviceId);
+      if (isStale()) return;
       nextPlayTimeRef.current = ctx.currentTime;
 
       // TalkSync Tx AudioContext 초기화
@@ -400,25 +432,50 @@ export function useGeminiLive() {
         if (!vbCtxRef.current || vbCtxRef.current.state === 'closed') {
           vbCtxRef.current = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE }) as AudioContextWithSink;
         }
-        if (vbCtxRef.current.state === 'suspended') await vbCtxRef.current.resume();
-        if (typeof vbCtxRef.current.setSinkId === 'function') {
+        const vbCtx = vbCtxRef.current;
+        if (vbCtx.state === 'suspended') await vbCtx.resume();
+        if (isStale()) return;
+        let vbSinkOk = false;
+        if (typeof vbCtx.setSinkId === 'function') {
           try {
-            await vbCtxRef.current.setSinkId(config.virtualMicDeviceId);
+            await vbCtx.setSinkId(config.virtualMicDeviceId);
+            vbSinkOk = true;
             console.log('[GeminiLive] TalkSync Tx 출력 장치 →', config.virtualMicDeviceId);
           } catch (e) {
-            console.warn('[GeminiLive] TalkSync Tx setSinkId 실패:', e);
+            console.error('[GeminiLive] TalkSync Tx setSinkId 실패 — Tx 출력 비활성화 (기본 출력 누수 방지):', e);
           }
+        } else {
+          console.error('[GeminiLive] setSinkId 미지원 — TalkSync Tx 출력 비활성화 (기본 출력 누수 방지)');
         }
-        nextVbPlayTimeRef.current = vbCtxRef.current.currentTime;
+        if (isStale()) return;
+        if (vbSinkOk) {
+          nextVbPlayTimeRef.current = vbCtx.currentTime;
+        } else {
+          // setSinkId 실패 시 vbCtx는 시스템 기본 출력으로 재생되므로 사용하지 않는다.
+          if (vbCtxRef.current === vbCtx) vbCtxRef.current = null;
+          vbCtx.close().catch(() => {});
+          setTxError(GEMINI_LIVE_TX_SINK_FAILED_MESSAGE);
+        }
+      } else if (vbCtxRef.current) {
+        // 이번 세션은 Tx 출력이 없음 → 이전 세션의 Tx sink로 오디오가 흘러가지 않도록 정리
+        vbCtxRef.current.close().catch(() => {});
+        vbCtxRef.current = null;
+        nextVbPlayTimeRef.current = 0;
       }
 
       const ws = new WebSocket(`${WS_ENDPOINT}?key=${config.apiKey}`);
       wsRef.current = ws;
+      // 이 소켓이 여전히 현재 소켓인지 — 이전 소켓의 늦은 이벤트가 새 세션을 덮어쓰지 않도록
+      const isCurrent = () => wsRef.current === ws;
 
       // onerror/onclose 중복 setState 방지
       let didError = false;
+      // 이 소켓이 한 번이라도 열렸는지 — 사용자 connect()의 최초 시도가 열리기 전에 실패하면 재시도하지 않음
+      let opened = false;
 
       ws.onopen = () => {
+        if (!isCurrent()) return;
+        opened = true;
         reconnectCountRef.current = 0; // 연결 성공 → 재시도 카운터 초기화
         // ── Setup 메시지: 세션 초기화 ─────────────────────────
         // responseModalities: ['AUDIO'] → 텍스트 없이 음성으로만 응답
@@ -466,23 +523,31 @@ export function useGeminiLive() {
       };
 
       ws.onmessage = (ev) => {
+        if (!isCurrent()) return;
         // Gemini Live는 JSON string 또는 Blob으로 메시지를 전송할 수 있음
         if (typeof ev.data === 'string') {
           handleMessage(ev.data);
         } else if (ev.data instanceof Blob) {
-          ev.data.text().then(handleMessage);
+          ev.data.text().then((text) => {
+            if (isCurrent()) handleMessage(text);
+          }).catch(() => {});
         }
       };
 
       ws.onerror = () => {
+        if (!isCurrent()) return;
         didError = true;
         const msg = GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE;
         console.error('[GeminiLive]', msg);
+        // 메시지만 보관 — state 'error'는 onclose에서 재연결이 더 이상 없을 때만 발행한다.
+        // (여기서 'error'를 발행하면 소비자는 세션을 포기했는데 훅은 재연결해 고아 세션이 생김)
         setError(msg);
-        setState('error');
       };
 
       ws.onclose = (ev) => {
+        // disconnect() 또는 새 connect() 이후 도착한 이전 소켓의 close → 무시
+        // (새 소켓을 null로 덮어쓰거나 state를 'disconnected'로 되돌리지 않음, 재연결도 예약하지 않음)
+        if (!isCurrent()) return;
         wsRef.current = null;
         // keepalive 중단
         if (keepaliveTimerRef.current) {
@@ -499,19 +564,32 @@ export function useGeminiLive() {
           return;
         }
         // 예상치 못한 연결 끊김 → 자동 재연결 (최대 3회)
+        // 단, 사용자 connect()의 최초 시도가 열리기도 전에 실패한 경우(키 오류/네트워크 없음)는
+        // 재시도 없이 즉시 최종 상태 — reconnectCountRef는 재연결 예약 시 먼저 증가하므로 0이면 최초 시도.
         const MAX_RETRIES = 3;
-        if (reconnectCountRef.current < MAX_RETRIES && configRef.current) {
+        const initialAttemptFailed = !opened && reconnectCountRef.current === 0;
+        if (!initialAttemptFailed && reconnectCountRef.current < MAX_RETRIES && configRef.current) {
           const delay = Math.pow(2, reconnectCountRef.current) * 1000; // 1s, 2s, 4s
           reconnectCountRef.current += 1;
           console.log(`[GeminiLive] ${delay/1000}초 후 자동 재연결 시도 (${reconnectCountRef.current}/${MAX_RETRIES})`);
+          // 재연결 대기 중 표시 (소켓 없음). 소비자의 'ready' 분기는 VAD가 이미 붙어 있으면 재실행되지 않는다.
+          setState('connecting');
+          if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
           reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null;
             if (configRef.current && !intentionalDisconnectRef.current) {
-              connect(configRef.current);
+              connectRef.current?.(configRef.current).catch((e) =>
+                console.error('[GeminiLive] 자동 재연결 실패:', e)
+              );
             }
           }, delay);
         } else {
+          // 재연결 없음(최초 시도 실패 또는 재시도 소진) → 여기서만 최종 'error'/'disconnected' 발행
           reconnectCountRef.current = 0;
-          if (!didError && ev.code !== 1000) {
+          if (didError) {
+            setError(GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE);
+            setState('error');
+          } else if (ev.code !== 1000) {
             const reason = ev.reason ? ` (${ev.reason})` : '';
             const msg = `${GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE} [close ${ev.code}${reason}]`;
             console.error('[GeminiLive]', msg);
@@ -525,6 +603,47 @@ export function useGeminiLive() {
     },
     [getCtx, handleMessage]
   );
+
+  const connect = useCallback(
+    (config: GeminiLiveConfig): Promise<void> => {
+      // 이미 연결됐거나 연결 중인 소켓이 있으면 두 번째 소켓을 만들지 않는다.
+      // 다른 config로 호출돼도 기존 세션을 유지한다 (console.warn 후 반환).
+      // 통화 중인 세션을 끊고 재연결하는 것보다 안전 — 설정을 바꾸려면 disconnect() 후 connect().
+      const existing = wsRef.current;
+      if (
+        existing &&
+        (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)
+      ) {
+        warnIfConfigDiffers(configRef.current, config);
+        return Promise.resolve();
+      }
+      // 소켓 생성 전(AudioContext/setSinkId await 중)인 connect()가 있으면 그 Promise를 공유
+      if (connectPromiseRef.current) {
+        warnIfConfigDiffers(configRef.current, config);
+        return connectPromiseRef.current;
+      }
+
+      // 새 세션 시작 — 이전 disconnect()의 의도적 종료 플래그 해제, 대기 중인 자동 재연결 취소
+      intentionalDisconnectRef.current = false;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+
+      connectSeqRef.current += 1;
+      const seq = connectSeqRef.current;
+      const promise = connectImpl(config, seq).finally(() => {
+        if (connectPromiseRef.current === promise) connectPromiseRef.current = null;
+      });
+      connectPromiseRef.current = promise;
+      return promise;
+    },
+    [connectImpl]
+  );
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   // ── 오디오 청크 전송 ─────────────────────────────────────────
   // VAD onSpeechEnd 콜백에서 chunk.base64를 그대로 전달
@@ -650,6 +769,9 @@ export function useGeminiLive() {
   // ── 연결 종료 ────────────────────────────────────────────────
   const disconnect = useCallback(() => {
     intentionalDisconnectRef.current = true; // 의도적 종료 표시
+    // 진행 중인 connect()(소켓 생성 전 await 구간)를 무효화
+    connectSeqRef.current += 1;
+    connectPromiseRef.current = null;
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -658,13 +780,22 @@ export function useGeminiLive() {
       clearInterval(keepaliveTimerRef.current);
       keepaliveTimerRef.current = null;
     }
-    wsRef.current?.close(1000, 'user disconnect');
+    // wsRef를 먼저 비운다 → 이 소켓의 늦은 onclose/onmessage는 isCurrent() 가드로 무시됨
+    const ws = wsRef.current;
     wsRef.current = null;
+    ws?.close(1000, 'user disconnect');
+    // TalkSync Tx AudioContext 정리 — 다음 세션이 Tx 없이 시작될 때 이전 sink로 송출되지 않도록
+    // (재생 대기 중인 번역 음성이 회의 앱으로 계속 나가는 것도 즉시 중단)
+    if (vbCtxRef.current) {
+      vbCtxRef.current.close().catch(() => {});
+      vbCtxRef.current = null;
+    }
     nextPlayTimeRef.current = 0;
     nextVbPlayTimeRef.current = 0;
     muteUntilRef.current = 0;
     subtitleAccRef.current = '';
     reconnectCountRef.current = 0;
+    setTxError(null);
     // 세션 종료 시 남은 버퍼 최종 flush
     if (wavExportEnabledRef.current) {
       wavAccRef.current?.flush({ minSamples: 2400 }).catch(() => {});
@@ -678,10 +809,20 @@ export function useGeminiLive() {
     onSubtitleRef.current = cb;
   }, []);
 
+  // ── 런타임 이어폰 모니터링 토글 ──────────────────────────────
+  // 호출자가 connect()에 넘긴 config 객체를 변형하지 않도록 복사본으로 교체
+  const setMonitorOutput = useCallback((enabled: boolean) => {
+    if (configRef.current) {
+      configRef.current = { ...configRef.current, muteLocalOutput: !enabled };
+    }
+  }, []);
+
   // ── 언마운트 정리 ────────────────────────────────────────────
   useEffect(() => {
     return () => {
       intentionalDisconnectRef.current = true;
+      connectSeqRef.current += 1;
+      connectPromiseRef.current = null;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (keepaliveTimerRef.current) clearInterval(keepaliveTimerRef.current);
       wsRef.current?.close(1000, 'unmount');
@@ -695,6 +836,11 @@ export function useGeminiLive() {
     state,
     /** 오류 메시지 (state === 'error' 일 때 표시) */
     error,
+    /**
+     * TalkSync Tx(회의방 송출) setSinkId 실패 메시지 — null이면 정상 또는 Tx 미사용.
+     * 세션 state는 'ready'로 유지되므로(fail-closed: Tx 출력만 차단) UI에서 별도 경고로 표시해야 한다.
+     */
+    txError,
     /**
      * AEC 게이트 Ref — VAD attachVAD({ muteUntilRef }) 에 직접 주입
      *
@@ -731,9 +877,7 @@ export function useGeminiLive() {
      * 런타임 muteLocalOutput 토글 — 재연결 없이 즉시 적용
      * true: 이어폰 출력 차단(기본), false: 이어폰으로도 재생(모니터링)
      */
-    setMonitorOutput: (enabled: boolean) => {
-      if (configRef.current) configRef.current.muteLocalOutput = !enabled;
-    },
+    setMonitorOutput,
     /**
      * WAV 자동 저장 활성화
      * Gemini 출력 PCM을 turnComplete 단위로 물리 WAV 파일 저장

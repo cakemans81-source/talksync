@@ -9,7 +9,7 @@
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
@@ -49,7 +49,6 @@ try {
     { stdio: 'pipe' }
   );
 
-  // eslint-disable-next-line import/no-dynamic-require
   const gate = require(join(outDir, 'isolationHardGate.js'));
   const { evaluateIsolationHardGate, isolationGateDisabledReason } = gate;
 

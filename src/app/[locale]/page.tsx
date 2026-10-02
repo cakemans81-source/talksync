@@ -3,8 +3,7 @@ import { getDictionary, hasLocale, type Locale } from './dictionaries';
 import { LanguageSwitcher } from '@/components/landing/LanguageSwitcher';
 import { LocalizedTrustSection } from '@/components/landing/TrustSection';
 
-const DOWNLOAD_URL =
-  'https://github.com/cakemans81-source/talksync/releases/latest/download/TalkSync-Setup.exe';
+import { WINDOWS_INSTALLER_URL as DOWNLOAD_URL } from '@/lib/release';
 
 export default async function LocalePage({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;

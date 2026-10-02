@@ -4,7 +4,6 @@
  * rcedit-x64.exe 호환 형식
  */
 const fs   = require('fs');
-const path = require('path');
 const { createCanvas, loadImage } = (() => {
   try { return require('canvas'); } catch { return null; }
 })() || {};

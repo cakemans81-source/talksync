@@ -2,609 +2,59 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { useTranslationPipeline, type PipelineConfig } from '@/hooks/useTranslationPipeline';
+import { useAudioRouter } from '@/hooks/useAudioRouter';
 import { useGeminiLive } from '@/hooks/useGeminiLive';
 import { SUPPORTED_LANGUAGES } from '@/lib/stt';
-import { validateGeminiKey } from '@/lib/gemini';
-import { encryptApiKey, decryptApiKey, cacheApiKeyInSession, getCachedApiKey, saveKeyLocally, loadKeyLocally } from '@/lib/crypto';
-import { getSupabaseClient, getCurrentUser, saveEncryptedKey, loadEncryptedKey } from '@/lib/supabase';
-import { loadUserSettings, saveUserSettings } from '@/lib/userSettings';
-import { DeviceSelector } from '@/components/audio/DeviceSelector';
-import { BrowserTabTranslatePanel, type BrowserTabLiveTranslateState } from '@/components/audio/BrowserTabTranslatePanel';
+import { decryptApiKey, cacheApiKeyInSession, getCachedApiKey, clearCachedApiKey, saveKeyLocally, loadKeyLocally } from '@/lib/crypto';
+import { getSupabaseClient, getCurrentUser, loadEncryptedKey } from '@/lib/supabase';
+import { loadUserSettings } from '@/lib/userSettings';
+import { BrowserTabTranslatePanel } from '@/components/audio/BrowserTabTranslatePanel';
 import { useAutoAudioSetup } from '@/hooks/useAutoAudioSetup';
-import { useBrowserTabAudioCapture } from '@/hooks/useBrowserTabAudioCapture';
-import { isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
 import {
   evaluateIsolationHardGate,
   isolationGateDisabledReason,
 } from '@/lib/isolationHardGate';
+import { GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE } from '@/lib/geminiModels';
+import { ApiKeyModal } from '@/components/studio/ApiKeyModal';
+import { AudioSetupPanel } from '@/components/studio/AudioSetupPanel';
 import {
-  TTS_VOICE_PRESETS, ELEVENLABS_VOICE_PRESETS, GEMINI_TTS_VOICE_PRESETS,
-  fetchElevenLabsVoices, buildElevenLabsLabel,
-  synthesizeEdgeTTS, synthesizeElevenLabsTTS, synthesizeGeminiTTS, defaultEdgeVoiceForLang,
-  type TTSEngine, type ElevenLabsVoice,
-} from '@/lib/tts';
-import { VAD_TRANSLATION_PRESETS } from '@/lib/systemAudioCapture';
-import {
-  GEMINI_LIVE_TRANSLATE_DISPLAY_NAME,
-  GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE,
-  toGeminiLiveTranslateLanguageCode,
-} from '@/lib/geminiModels';
-
-// ── Gemini 출력 후처리: 타겟 언어 텍스트만 추출 ──────────
-function extractTranslation(raw: string, targetLangCode: string): string {
-  // 마크다운 제거
-  const text = raw.replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*(.*?)\*/g, '$1').trim();
-
-  // 언어별 문자 패턴
-  let charPattern: RegExp | null = null;
-  if (targetLangCode.startsWith('ja')) {
-    charPattern = /[\u3040-\u30FF]/; // 히라가나/가타카나 필수
-  } else if (targetLangCode.startsWith('ko')) {
-    charPattern = /[\uAC00-\uD7AF]/; // 한글
-  } else if (targetLangCode.startsWith('zh')) {
-    charPattern = /[\u4E00-\u9FFF]/; // 한자
-  }
-
-  if (!charPattern) return text; // 라틴 계열은 후처리 없이 반환
-
-  // 전략1: 따옴표 안의 타겟 언어 텍스트 중 마지막/가장 긴 것
-  const quoteRe = /["""「『]([\s\S]*?)["""」』]/g;
-  const quoted = [...text.matchAll(quoteRe)]
-    .map((m) => m[1].trim())
-    .filter((s) => charPattern!.test(s));
-  if (quoted.length > 0) {
-    // 가장 긴 인용구 반환 (보통 "combined translation"이 마지막/가장 김)
-    return quoted.reduce((a, b) => (b.length >= a.length ? b : a));
-  }
-
-  // 전략2: 타겟 언어 문자를 포함하는 문장만 추출
-  const sentences = text
-    .split(/(?<=[。.!?！？\n])/)
-    .map((s) => s.trim())
-    .filter((s) => charPattern!.test(s));
-  if (sentences.length > 0) return sentences.join(' ');
-
-  return text;
-}
-
-// ── 장치 뱃지 (자동 설정 완료 시 표시) ─────────
-function DeviceBadge({ icon, label, value }: { icon: string; label: string; value: string }) {
-  return (
-    <div className="flex items-center gap-1.5 px-2.5 py-1 bg-white border border-zinc-200 rounded-lg">
-      <span className="text-xs">{icon}</span>
-      <span className="text-[10px] text-zinc-400">{label}</span>
-      <span className="text-[11px] font-medium text-zinc-700 max-w-[140px] truncate">{value}</span>
-    </div>
-  );
-}
-
-// ── 음성 레벨 바 ──────────────────────────────
-function LevelBar({ level, color = 'bg-zinc-900' }: { level: number; color?: string }) {
-  return (
-    <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden w-20">
-      <div
-        className={`h-full ${color} transition-all duration-75 rounded-full`}
-        style={{ width: `${Math.round(level * 100)}%` }}
-      />
-    </div>
-  );
-}
-
-// ── 자막 카드 ─────────────────────────────────
-function TranscriptCard({
-  original, translated, source, isStreaming,
-}: {
-  original: string; translated: string; source: 'mic' | 'sys'; isStreaming?: boolean;
-}) {
-  return (
-    <div className={`rounded-2xl p-4 border transition-all ${
-      source === 'mic'
-        ? 'bg-zinc-900 border-zinc-800 text-white'
-        : 'bg-white border-zinc-100 text-zinc-900'
-    }`}>
-      <div className="flex items-center gap-2 mb-2">
-        <span className="text-xs opacity-50">{source === 'mic' ? '🎙 내 음성' : '🎧 상대방'}</span>
-        {isStreaming && (
-          <span className="flex gap-0.5 items-end h-3">
-            {[0, 1, 2].map((i) => (
-              <span key={i}
-                className={`w-0.5 rounded-full animate-bounce ${source === 'mic' ? 'bg-white/50' : 'bg-zinc-400'}`}
-                style={{ height: `${6 + i * 2}px`, animationDelay: `${i * 0.15}s` }}
-              />
-            ))}
-          </span>
-        )}
-      </div>
-      <p className="text-xs opacity-50 mb-1.5 leading-relaxed">{original}</p>
-      <p className="text-sm font-medium leading-relaxed">
-        {translated || (isStreaming ? <span className="opacity-40 italic">번역 중...</span> : '')}
-      </p>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────
-// 가상 오디오 장치 감지
-//
-// VB-Cable (Windows) / BlackHole (macOS) / Voicemeeter / Soundflower 등
-// 장치 라벨에서 가상 오디오 드라이버 키워드를 검색
-// ─────────────────────────────────────────────
-async function detectVirtualAudioDevice(): Promise<boolean> {
-  try {
-    // 권한 없이 호출하면 라벨이 빈 문자열로 오므로 먼저 마이크 권한 요청
-    try {
-      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-      s.getTracks().forEach((t) => t.stop());
-    } catch { /* 이미 허용됐거나 불가 — 계속 진행 */ }
-
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    return devices.some(isVirtualAudioDevice);
-  } catch {
-    return false;
-  }
-}
-
-// Electron shell.openExternal 래퍼 — 웹 환경에서는 window.open 폴백
-function openExternal(url: string) {
-  const api = (window as Window & { electronAPI?: { openExternal: (u: string) => void } }).electronAPI;
-  if (api?.openExternal) {
-    api.openExternal(url);
-  } else {
-    window.open(url, '_blank', 'noopener,noreferrer');
-  }
-}
-
-// ── 웹 환경 진입 차단 Fallback ────────────────
-// Vercel/브라우저에서 /studio 직접 접근 시 전체 화면 안내 표시
-// 데스크탑 앱(Electron)에서는 렌더링되지 않음
-const WEB_DOWNLOAD_URL =
-  "https://github.com/cakemans81-source/talksync/releases/latest/download/TalkSync-Setup.exe";
-const ENABLE_BROWSER_TAB_CAPTURE_WEB_DEV = process.env.NODE_ENV === 'development';
-const DRIVER_CHECK_TIMEOUT_MS = 2500;
-
-function WebOnlyFallback() {
-  return (
-    <div className="fixed inset-0 z-[200] bg-zinc-950 flex items-center justify-center p-6">
-      <div className="max-w-md w-full text-center">
-        {/* 아이콘 */}
-        <div className="w-20 h-20 bg-zinc-800 rounded-3xl flex items-center justify-center mx-auto mb-8">
-          <span className="text-4xl">🎙</span>
-        </div>
-
-        <h1 className="text-2xl font-bold text-white mb-3 tracking-tight">TalkSync</h1>
-        <p className="text-zinc-400 text-sm leading-relaxed mb-8">
-          실시간 통역 기능은 <span className="text-white font-medium">Windows 데스크탑 앱</span>에서만 지원됩니다.<br />
-          브라우저 환경에서는 시스템 오디오 캡처 및<br />Discord 연동이 불가능합니다.
-        </p>
-
-        {/* 다운로드 버튼 */}
-        <a
-          href={WEB_DOWNLOAD_URL}
-          className="inline-flex items-center gap-2.5 bg-white text-zinc-900 px-8 py-3.5 rounded-2xl font-semibold text-sm hover:bg-zinc-100 transition-colors mb-4"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-          </svg>
-          Windows용 무료 다운로드
-        </a>
-
-        <p className="text-zinc-600 text-xs">
-          설치 후 앱을 실행하고 Google 계정으로 로그인하세요
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────
-// Gemini Live Translate 상태 시각화 — 파동 애니메이션
-// ─────────────────────────────────────────────
-const LIVE_VOICES = [
-  { name: 'Aoede',  label: 'Aoede — 밝은 여성' },
-  { name: 'Puck',   label: 'Puck — 경쾌한 남성' },
-  { name: 'Charon', label: 'Charon — 차분한 남성' },
-  { name: 'Fenrir', label: 'Fenrir — 낮고 강한 남성' },
-  { name: 'Kore',   label: 'Kore — 차분한 여성' },
-  { name: 'Zephyr', label: 'Zephyr — 부드러운 중성' },
-] as const;
-type LivePhase = 'listening' | 'processing' | 'speaking';
-
-function LiveStatusIndicator({ phase }: { phase: LivePhase }) {
-  if (phase === 'processing') {
-    return (
-      <div className="flex items-center gap-1.5">
-        <span className="w-4 h-4 border-2 border-amber-300 border-t-amber-600 rounded-full animate-spin" />
-      </div>
-    );
-  }
-  const count = phase === 'speaking' ? 5 : 3;
-  const heights = phase === 'speaking' ? [6, 14, 22, 14, 6] : [6, 12, 6];
-  const color   = phase === 'speaking' ? 'bg-green-500' : 'bg-blue-400';
-  const speed   = phase === 'speaking' ? '0.55s' : '1s';
-  return (
-    <div className="flex items-end gap-[3px] h-6">
-      {Array.from({ length: count }).map((_, i) => (
-        <div
-          key={i}
-          className={`w-[3px] rounded-full ${color} animate-bounce`}
-          style={{ height: `${heights[i]}px`, animationDelay: `${i * 0.1}s`, animationDuration: speed }}
-        />
-      ))}
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────
-// Gemini Live Translate 통역 패널
-// ─────────────────────────────────────────────
-function GeminiLivePanel({
-  wsState,
-  liveActive,
-  livePhase,
-  liveVoice,
-  liveError,
-  liveCustomTTS,
-  vadSpeed,
-  disabled = false,
-  disabledReason,
-  onStart,
-  onStop,
-  onVoiceChange,
-  onCustomTTSChange,
-  onVadSpeedChange,
-}: {
-  wsState: 'disconnected' | 'connecting' | 'ready' | 'error';
-  liveActive: boolean;
-  livePhase: LivePhase;
-  liveVoice: string;
-  liveError: string | null;
-  liveCustomTTS: boolean;
-  vadSpeed: 'fast' | 'balanced' | 'accurate';
-  disabled?: boolean;
-  disabledReason?: string;
-  onStart: () => void;
-  onStop: () => void;
-  onVoiceChange: (v: string) => void;
-  onCustomTTSChange: (enabled: boolean) => void;
-  onVadSpeedChange: (speed: 'fast' | 'balanced' | 'accurate') => void;
-}) {
-  const isConnecting = wsState === 'connecting';
-  const startDisabled = isConnecting || disabled;
-
-  const dotColor =
-    !liveActive                  ? 'bg-zinc-300'
-    : livePhase === 'speaking'   ? 'bg-green-500 animate-pulse'
-    : livePhase === 'processing' ? 'bg-amber-500 animate-pulse'
-    :                              'bg-blue-500 animate-pulse';
-
-  const phaseLabel =
-    livePhase === 'speaking'   ? (liveCustomTTS ? '커스텀 TTS 재생 중' : '통역 재생 중')
-    : livePhase === 'processing' ? 'Gemini에 전달 중...'
-    :                              '상대방 음성 대기 중...';
-
-  return (
-    <div className={`rounded-2xl border px-4 py-3 transition-colors ${
-      liveActive ? 'bg-indigo-50 border-indigo-200' : 'bg-zinc-50 border-zinc-200'
-    }`}>
-      <div className="flex items-center gap-3 flex-wrap">
-
-        {/* 배지 */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <div className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
-          <span className="text-xs font-semibold text-zinc-700">{GEMINI_LIVE_TRANSLATE_DISPLAY_NAME}</span>
-          <span className="text-[10px] font-medium text-indigo-600 bg-indigo-100 px-1.5 py-0.5 rounded-full">Beta</span>
-        </div>
-
-        {/* 상태 애니메이션 (활성 시만) */}
-        {liveActive && (
-          <div className="flex items-center gap-2">
-            <LiveStatusIndicator phase={livePhase} />
-            <span className="text-xs text-zinc-500">{phaseLabel}</span>
-          </div>
-        )}
-
-        <div className="flex-1" />
-
-        {/* TTS 출력 모드 세그먼트 컨트롤 */}
-        <div className="flex items-center shrink-0 bg-zinc-100 rounded-xl p-0.5 gap-0.5">
-          <button
-            onClick={() => onCustomTTSChange(false)}
-            className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
-              !liveCustomTTS
-                ? 'bg-white text-zinc-900 shadow-sm'
-                : 'text-zinc-500 hover:text-zinc-700'
-            }`}
-          >
-            ⚡ 초저지연
-          </button>
-          <button
-            onClick={() => onCustomTTSChange(true)}
-            className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
-              liveCustomTTS
-                ? 'bg-white text-zinc-900 shadow-sm'
-                : 'text-zinc-500 hover:text-zinc-700'
-            }`}
-          >
-            🎧 프리미엄
-          </button>
-        </div>
-
-        {/* 음성 선택 (초저지연 모드에서만 표시) */}
-        {!liveCustomTTS && (
-          <div className="flex items-center gap-1.5 shrink-0">
-            <label className="text-xs text-zinc-400">음성</label>
-            <select
-              value={liveVoice}
-              onChange={(e) => onVoiceChange(e.target.value)}
-              disabled={liveActive}
-              className="h-8 px-2 text-xs bg-white border border-zinc-200 rounded-lg text-zinc-700 focus:outline-none disabled:opacity-50 cursor-pointer"
-            >
-              {LIVE_VOICES.map((v) => <option key={v.name} value={v.name}>{v.label}</option>)}
-            </select>
-          </div>
-        )}
-
-        {/* 반응 속도 */}
-        <div className="flex flex-col gap-1 shrink-0">
-          <div className="flex items-center gap-1.5">
-            <label className="text-xs text-zinc-400">속도</label>
-            <div className="flex rounded-lg border border-zinc-200 overflow-hidden text-xs">
-              {(['fast', 'balanced', 'accurate'] as const).map((s) => (
-                <button
-                  key={s}
-                  disabled={liveActive}
-                  onClick={() => onVadSpeedChange(s)}
-                  className={`px-2.5 py-1 transition-colors disabled:opacity-50 ${
-                    vadSpeed === s
-                      ? 'bg-zinc-900 text-white'
-                      : 'bg-white text-zinc-500 hover:bg-zinc-50'
-                  }`}
-                >
-                  {s === 'fast' ? '빠름' : s === 'balanced' ? '보통' : '정확'}
-                </button>
-              ))}
-            </div>
-          </div>
-          <p className="text-[10px] text-zinc-400 leading-tight">
-            {vadSpeed === 'fast'     && '말이 끝나면 즉시 전송 — 짧은 발화에 최적'}
-            {vadSpeed === 'balanced' && '속도와 안정성의 균형 — 대부분의 환경에 권장'}
-            {vadSpeed === 'accurate' && '긴 문장도 끊기지 않게 — 느리지만 정확'}
-          </p>
-        </div>
-
-        {/* 프리미엄 모드 안내 레이블 */}
-        {liveCustomTTS && (
-          <span className="text-[11px] text-violet-600 bg-violet-50 border border-violet-200 px-2.5 py-1.5 rounded-xl shrink-0">
-            커스텀 TTS 모드
-          </span>
-        )}
-
-        {disabled && disabledReason && !liveActive && (
-          <span className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-xl shrink-0">
-            {disabledReason}
-          </span>
-        )}
-
-        {/* 시작 / 정지 버튼 */}
-        {!liveActive ? (
-          <button
-            onClick={onStart}
-            disabled={startDisabled}
-            className="flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-zinc-300 disabled:shadow-none text-white text-xs font-medium rounded-xl transition-colors shrink-0 shadow shadow-indigo-600/20"
-          >
-            {isConnecting ? (
-              <>
-                <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                연결 중...
-              </>
-            ) : disabled ? (
-              '격리 조건 미충족'
-            ) : (
-              <>
-                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3zm6 10a1 1 0 0 0-2 0 4 4 0 0 1-8 0 1 1 0 0 0-2 0 6 6 0 0 0 5 5.92V19H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-2.08A6 6 0 0 0 18 11z"/>
-                </svg>
-                Live Translate 시작
-              </>
-            )}
-          </button>
-        ) : (
-          <button
-            onClick={onStop}
-            className="flex items-center gap-1.5 px-4 py-1.5 bg-red-500 hover:bg-red-600 text-white text-xs font-medium rounded-xl transition-colors shrink-0 shadow shadow-red-500/20"
-          >
-            <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
-            정지
-          </button>
-        )}
-      </div>
-
-      {/* 인라인 에러 */}
-      {liveError && (
-        <div className="mt-2 text-xs text-red-600 bg-red-50 border border-red-100 rounded-xl px-3 py-2 leading-relaxed">
-          ⚠ {liveError}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── API 키 설정 모달 ──────────────────────────
-function ApiKeyModal({
-  userId, hasExistingKey, onUserResolved, onSave, onClose,
-}: {
-  userId: string | null;
-  hasExistingKey: boolean;
-  onUserResolved: (userId: string) => void;
-  onSave: (key: string) => void;
-  onClose: () => void;
-}) {
-  const [apiKey, setApiKey] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [validated, setValidated] = useState(false);
-  const [error, setError] = useState('');
-
-  async function handleValidate() {
-    if (!apiKey.trim()) return;
-    setLoading(true);
-    setError('');
-    try {
-      const valid = await validateGeminiKey(apiKey.trim());
-      if (!valid) throw new Error('유효하지 않은 키입니다. Google AI Studio에서 다시 확인해주세요.');
-      setValidated(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '검증 실패');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleSave() {
-    setLoading(true);
-    try {
-      let resolvedUserId = userId;
-      if (!resolvedUserId) {
-        const user = await getCurrentUser();
-        if (!user) throw new Error('로그인 상태를 확인할 수 없습니다. 다시 로그인한 뒤 API 키를 저장해 주세요.');
-        resolvedUserId = user.id;
-        onUserResolved(user.id);
-      }
-
-      const encrypted = await encryptApiKey(apiKey.trim(), resolvedUserId);
-
-      // 로컬 저장 먼저 — Supabase가 실패해도 다음 로그인 시 복원 가능
-      saveKeyLocally(encrypted, resolvedUserId);
-      cacheApiKeyInSession(apiKey.trim());
-
-      // Supabase 저장 (실패해도 로컬에 있으므로 앱 동작엔 영향 없음)
-      try {
-        await saveEncryptedKey(resolvedUserId, encrypted);
-      } catch { /* Supabase 저장 실패 — 로컬에 저장됐으므로 계속 진행 */ }
-
-      onSave(apiKey.trim());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : JSON.stringify(err));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[220] flex items-center justify-center p-4">
-      <div className="relative bg-white rounded-3xl shadow-2xl w-full max-w-lg p-8 border border-zinc-100">
-        <button
-          type="button"
-          onClick={onClose}
-          disabled={loading}
-          aria-label="API 키 설정 닫기"
-          className="absolute right-5 top-5 w-8 h-8 rounded-full border border-zinc-200 text-zinc-400 hover:text-zinc-700 hover:bg-zinc-50 disabled:opacity-40 transition-colors"
-        >
-          ×
-        </button>
-
-        {/* 헤더 */}
-        <div className="flex items-start gap-4 mb-7">
-          <div className="w-12 h-12 bg-zinc-900 rounded-2xl flex items-center justify-center flex-shrink-0">
-            <span className="text-white text-xl">🔑</span>
-          </div>
-          <div>
-            <h2 className="text-lg font-semibold text-zinc-900">Gemini API 키 설정</h2>
-            <p className="text-sm text-zinc-400 mt-0.5">통역에 사용할 API 키를 입력해주세요</p>
-          </div>
-        </div>
-
-        {hasExistingKey && (
-          <div className="mb-4 p-3 bg-green-50 border border-green-100 rounded-xl text-sm text-green-700">
-            저장된 Gemini API 키가 있습니다. 새 키를 저장하면 기존 키가 교체됩니다.
-          </div>
-        )}
-
-        {/* API 가이드 */}
-        <div className="bg-zinc-50 rounded-2xl p-4 mb-6 border border-zinc-100">
-          <p className="text-xs font-medium text-zinc-700 mb-3">[1분 완성] 무료 API 키 발급</p>
-          <div className="space-y-2">
-            {[
-              { n: '1', text: 'aistudio.google.com 접속 →', link: 'https://aistudio.google.com/app/apikey' },
-              { n: '2', text: '"Create API key" 클릭' },
-              { n: '3', text: '"AIza..."로 시작하는 키 복사 후 아래 입력' },
-            ].map(({ n, text, link }) => (
-              <div key={n} className="flex items-center gap-2.5">
-                <span className="w-5 h-5 bg-zinc-900 text-white text-xs rounded-full flex items-center justify-center flex-shrink-0 font-bold">{n}</span>
-                {link ? (
-                  <a href={link} target="_blank" rel="noopener noreferrer"
-                    className="text-xs text-blue-600 hover:underline">{text}</a>
-                ) : (
-                  <span className="text-xs text-zinc-600">{text}</span>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {error && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-100 rounded-xl text-sm text-red-600">{error}</div>
-        )}
-
-        {/* 입력 */}
-        <div className="relative mb-4">
-          <input
-            type="text"
-            value={apiKey}
-            onChange={(e) => { setApiKey(e.target.value); setValidated(false); setError(''); }}
-            placeholder="AIzaSy..."
-            className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-xl text-sm font-mono text-zinc-900 placeholder-zinc-300 focus:outline-none focus:ring-2 focus:ring-zinc-900/20 focus:border-zinc-400 transition pr-20"
-          />
-          {validated && (
-            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs bg-green-50 text-green-600 font-medium px-2 py-1 rounded-lg border border-green-100">
-              ✓ 유효
-            </span>
-          )}
-        </div>
-
-        {/* 버튼 */}
-        {!validated ? (
-          <button
-            onClick={handleValidate}
-            disabled={loading || !apiKey.trim()}
-            className="w-full py-3 border-2 border-zinc-900 text-zinc-900 hover:bg-zinc-900 hover:text-white disabled:border-zinc-200 disabled:text-zinc-300 font-medium rounded-2xl transition-colors text-sm"
-          >
-            {loading ? '확인 중...' : '키 유효성 확인'}
-          </button>
-        ) : (
-          <button
-            onClick={handleSave}
-            disabled={loading}
-            className="w-full py-3 bg-zinc-900 hover:bg-zinc-700 disabled:bg-zinc-300 text-white font-medium rounded-2xl transition-colors text-sm shadow-lg shadow-zinc-900/20"
-          >
-            {loading ? '저장 중...' : '저장하고 통역 시작하기 →'}
-          </button>
-        )}
-
-        <p className="text-center text-xs text-zinc-300 mt-4">
-          🔒 키는 AES-256으로 암호화 저장됩니다
-        </p>
-      </div>
-    </div>
-  );
-}
+  ENABLE_BROWSER_TAB_CAPTURE_WEB_DEV,
+  VAD_SPEED_PRESETS,
+  type LiveSubtitle,
+  type VADSpeed,
+} from '@/components/studio/constants';
+import { DriverNotice } from '@/components/studio/DriverNotice';
+import { extractTranslation } from '@/components/studio/extractTranslation';
+import { GeminiLivePanel, type LivePhase } from '@/components/studio/GeminiLivePanel';
+import { IsolationChecklist } from '@/components/studio/IsolationChecklist';
+import { MicLevelMeter } from '@/components/studio/LevelBar';
+import { buildBidirectionalInstruction } from '@/components/studio/liveInstructions';
+import { ManualDeviceSelectors } from '@/components/studio/ManualDeviceSelectors';
+import { StudioHeader } from '@/components/studio/StudioHeader';
+import { SubtitleFeed, UsageGuide } from '@/components/studio/SubtitleFeed';
+import { useBrowserTabRx } from '@/components/studio/useBrowserTabRx';
+import { useLiveCustomTTS } from '@/components/studio/useLiveCustomTTS';
+import { useVirtualCableCheck } from '@/components/studio/useVirtualCableCheck';
+import { WebOnlyFallback } from '@/components/studio/WebOnlyFallback';
 
 // ─────────────────────────────────────────────
 // 메인 Studio 페이지
 // ─────────────────────────────────────────────
 export default function StudioPage() {
   const router = useRouter();
-  const pipeline = useTranslationPipeline();
+  const pipeline = useAudioRouter();
+  // useAudioRouter / useGeminiLive는 매 렌더 새 객체를 반환하므로 deps에는 안정적인 useCallback 멤버만 사용
+  // (pipeline.isMicActive / isSysActive는 getter — 호출 시점에 직접 읽음)
+  const { getMicLevel, startVADWeb, playBlobToEarphone, setMicDevice, setVirtualMicDevice, setEarphoneDevice } = pipeline;
   const geminiLive = useGeminiLive();
-  const browserTabGeminiLive = useGeminiLive();
+  const { setMuteUntil, setSubtitleCallback: setLiveSubtitleCallback } = geminiLive;
   const autoAudio = useAutoAudioSetup();
-  const browserTabAudio = useBrowserTabAudioCapture();
   const subtitleEndRef = useRef<HTMLDivElement>(null);
 
   const [userId, setUserId] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [showApiModal, setShowApiModal] = useState(false);
-  const [virtualCableReady, setVirtualCableReady] = useState<boolean | null>(null); // null = 검사 전
+  const [virtualCableReady, setVirtualCableReady] = useVirtualCableCheck(); // null = 검사 전
   // Electron 여부 — 마운트 후 감지 (SSR hydration mismatch 방지)
   const [isElectron, setIsElectron] = useState<boolean | null>(null);
 
@@ -613,30 +63,7 @@ export default function StudioPage() {
   const [micDeviceId, setMicDeviceId] = useState('default');
   const [virtualMicDeviceId, setVirtualMicDeviceId] = useState('default');
   const [earphoneDeviceId, setEarphoneDeviceId] = useState('default');
-  const [showAdvancedDevices, setShowAdvancedDevices] = useState(false);
-  const [ttsEngine, setTtsEngine] = useState<TTSEngine>('edge');
-  const [ttsVoice, setTtsVoice] = useState('ko-KR-SunHiNeural'); // localStorage에서 복원
-  const [ttsRate, setTtsRate] = useState(1.0);       // 말하기 속도 — localStorage에서 복원
-  const [elevenLabsApiKey, setElevenLabsApiKey] = useState('');  // ElevenLabs API 키
-
-  // ── ElevenLabs 동적 보이스 패치 상태 ──────────
-  const [elVoices, setElVoices] = useState<{ id: string; label: string; previewUrl?: string }[]>(ELEVENLABS_VOICE_PRESETS);
-  const [elVoicesLoading, setElVoicesLoading] = useState(false);
-  const [elVoicesError, setElVoicesError] = useState<string | null>(null);
-  const elFetchedKeyRef = useRef<string>(''); // 중복 패치 방지
-
-  // ── ElevenLabs 보이스 미리 듣기 상태 ──────────
-  const [elPreviewState, setElPreviewState] = useState<'idle' | 'loading' | 'playing'>('idle');
-  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
-
-  const [micLevel, setMicLevel] = useState(0);
-  const levelRafRef = useRef<number>(0);
   const [cableDetected, setCableDetected] = useState(false);
-
-  // ── VAD 반응 속도 프리셋 (통번역 최적화 — systemAudioCapture.ts 정의)
-  // rmsTimeoutMs = redemptionMs + 200ms 동적 공식으로 폴백 하드코딩 문제 해결
-  type VADSpeed = 'fast' | 'balanced' | 'accurate';
-  const VAD_SPEED_PRESETS = VAD_TRANSLATION_PRESETS;
   const [vadSpeed, setVadSpeed] = useState<VADSpeed>('balanced');
 
   // ── Gemini Live Translate V2 파이프라인 상태 ────────────
@@ -656,17 +83,14 @@ export default function StudioPage() {
   // 최초 'ready' 도달 여부 — setLiveActive(true) 리렌더링 시 state='disconnected'에서
   // useEffect cleanup 분기가 조기 실행되는 것을 방지하는 핵심 가드
   const liveWasReadyRef = useRef(false);
-  // TTS 출력 모드: false = 초저지연(Gemini PCM), true = 프리미엄(커스텀 TTS)
-  const [liveCustomTTS, setLiveCustomTTS] = useState(false);
   // V2 실시간 자막 (turnComplete 시 Gemini 텍스트 파트 수집)
-  const [liveSubtitles, setLiveSubtitles] = useState<Array<{ id: string; text: string; timestamp: number }>>([]);
-  const [browserTabRxState, setBrowserTabRxState] = useState<BrowserTabLiveTranslateState>('idle');
-  const [browserTabRxError, setBrowserTabRxError] = useState<string | null>(null);
-  const stopBrowserTabRxVADRef = useRef<(() => void) | null>(null);
-  const browserTabRxStartedRef = useRef(false);
-  const browserTabRxWasReadyRef = useRef(false);
-  // 커스텀 TTS 콜백에서 최신 TTS 파라미터를 읽기 위한 Ref (stale closure 방지)
-  const liveCustomTTSParamsRef = useRef({ ttsEngine, ttsVoice, ttsRate, elevenLabsApiKey, apiKey, micLang });
+  const [liveSubtitles, setLiveSubtitles] = useState<LiveSubtitle[]>([]);
+  // 자막 콜백(마운트 시 1회 등록)에서 최신 언어를 읽기 위한 Ref
+  const micLangRef = useRef(micLang);
+
+  // 프리미엄(커스텀 TTS) 모드 — TTS 설정 복원 + ElevenLabs 보이스 검증 + 합성 콜백
+  const customTTS = useLiveCustomTTS({ micLang, apiKey, setMuteUntil, playBlobToEarphone });
+  const { liveCustomTTS, liveCustomTTSCallbackRef, setElevenLabsApiKey } = customTTS;
 
   const openApiKeyModal = useCallback(() => {
     setShowApiModal(true);
@@ -685,8 +109,26 @@ export default function StudioPage() {
         setLiveToast('로그인 상태를 확인할 수 없습니다. 다시 로그인한 뒤 API 키를 설정해 주세요.');
       });
   }, [router, userId]);
-  // 커스텀 TTS 콜백 Ref — 항상 최신 paramsRef를 통해 읽음
-  const liveCustomTTSCallbackRef = useRef<(text: string) => void>(() => {});
+
+  // ── 자막 추가 (Gemini Live Translate / Browser Tab Rx 공용) ──────────────
+  const appendSubtitle = useCallback((text: string) => {
+    const clean = extractTranslation(text, micLangRef.current);
+    setLiveSubtitles((prev) => [
+      ...prev.slice(-49),
+      { id: `${Date.now()}-${Math.random()}`, text: clean, timestamp: Date.now() },
+    ]);
+  }, []);
+  const clearSubtitles = useCallback(() => setLiveSubtitles([]), []);
+
+  // Browser Tab Live Translate Rx — 탭 오디오 캡처 + 전용 Gemini Live 세션
+  const browserTabRx = useBrowserTabRx({
+    startVADWeb,
+    vadSpeed,
+    onSubtitle: appendSubtitle,
+    onSessionStart: clearSubtitles,
+    onMissingApiKey: openApiKeyModal,
+  });
+  const browserTabAudio = browserTabRx.audio;
 
   const listenLanguageLabel = SUPPORTED_LANGUAGES.find((l) => l.code === micLang)?.label ?? micLang;
   const meetingVoiceLanguageLabel = SUPPORTED_LANGUAGES.find((l) => l.code === sysLang)?.label ?? sysLang;
@@ -697,90 +139,14 @@ export default function StudioPage() {
     setIsElectron(detected);
   }, []);
 
-  // ── TTS 엔진·음성·속도 설정 복원 ──────────────
   useEffect(() => {
-    const defaultVoices: Record<TTSEngine, string> = {
-      edge: 'ko-KR-SunHiNeural',
-      elevenlabs: '21m00Tcm4TlvDq8ikWAM',
-      gemini: 'Aoede',
-    };
-    const savedEngine = (localStorage.getItem('ttsEngine') ?? 'edge') as TTSEngine;
-    setTtsEngine(savedEngine);
-
-    const savedVoice = localStorage.getItem(`ttsVoice_${savedEngine}`);
-    setTtsVoice(savedVoice ?? defaultVoices[savedEngine]);
-
-    const savedRate = parseFloat(localStorage.getItem('ttsRate') ?? '');
-    if (!isNaN(savedRate) && savedRate >= 0.5 && savedRate <= 2.0) setTtsRate(savedRate);
-
-    if (localStorage.getItem('liveCustomTTS') === '1') setLiveCustomTTS(true);
-
-    // ElevenLabs 키는 userId 확정 후 loadUserSettings()에서 로드 (아래 인증 useEffect)
-  }, []);
-
-  // ── 커스텀 TTS 파라미터 Ref 동기화 ───────────
-  useEffect(() => {
-    liveCustomTTSParamsRef.current = { ttsEngine, ttsVoice, ttsRate, elevenLabsApiKey, apiKey, micLang };
-  }, [ttsEngine, ttsVoice, ttsRate, elevenLabsApiKey, apiKey, micLang]);
-
-  // ── 커스텀 TTS 콜백 초기화 (마운트 시 1회) ────
-  // 항상 liveCustomTTSParamsRef.current에서 최신 파라미터를 읽으므로 stale closure 없음
-  useEffect(() => {
-    liveCustomTTSCallbackRef.current = async (text: string) => {
-      if (!text.trim()) return;
-      const { ttsEngine, ttsVoice, ttsRate, elevenLabsApiKey, apiKey, micLang } = liveCustomTTSParamsRef.current;
-
-      let audioBuffer: ArrayBuffer | null = null;
-      try {
-        if (ttsEngine === 'elevenlabs') {
-          if (!elevenLabsApiKey) throw new Error('ElevenLabs API 키 없음');
-          audioBuffer = await synthesizeElevenLabsTTS(text, ttsVoice, elevenLabsApiKey);
-        } else if (ttsEngine === 'gemini') {
-          audioBuffer = await synthesizeGeminiTTS(text, ttsVoice, apiKey);
-        } else {
-          audioBuffer = await synthesizeEdgeTTS(text, ttsVoice, ttsRate);
-        }
-      } catch (primaryErr) {
-        console.warn('[Live Custom TTS] 1차 합성 실패:', primaryErr);
-        try {
-          const fallbackVoice = defaultEdgeVoiceForLang(micLang as import('@/lib/stt').STTLanguage);
-          audioBuffer = await synthesizeEdgeTTS(text, fallbackVoice, ttsRate);
-        } catch { /* Edge TTS도 실패 — 무음으로 진행 */ }
-      }
-
-      if (audioBuffer) {
-        const estimatedMs = (audioBuffer.byteLength / 6000) * 1000 + 5000;
-        geminiLive.setMuteUntil(Date.now() + estimatedMs);
-        await pipeline.playBlobToEarphone(new Blob([audioBuffer], { type: 'audio/mp3' }));
-        geminiLive.setMuteUntil(Date.now() + 5000); // 재생 후 5초 추가 뮤트
-      }
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // 마운트 시 1회 — 내부에서 ref 직접 참조
+    micLangRef.current = micLang;
+  }, [micLang]);
 
   // ── Gemini Live Translate 자막 콜백 등록 (마운트 시 1회) ──────────────
   useEffect(() => {
-    geminiLive.setSubtitleCallback((text: string) => {
-      const clean = extractTranslation(text, liveCustomTTSParamsRef.current.micLang);
-      setLiveSubtitles((prev) => [
-        ...prev.slice(-49),
-        { id: `${Date.now()}-${Math.random()}`, text: clean, timestamp: Date.now() },
-      ]);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ── Browser Tab Rx 자막 콜백 등록 ─────────────────────────────
-  useEffect(() => {
-    browserTabGeminiLive.setSubtitleCallback((text: string) => {
-      const clean = extractTranslation(text, liveCustomTTSParamsRef.current.micLang);
-      setLiveSubtitles((prev) => [
-        ...prev.slice(-49),
-        { id: `${Date.now()}-${Math.random()}`, text: clean, timestamp: Date.now() },
-      ]);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    setLiveSubtitleCallback(appendSubtitle);
+  }, [setLiveSubtitleCallback, appendSubtitle]);
 
   // ── V2 자막 자동 스크롤 ──────────────────────────────────
   useEffect(() => {
@@ -788,40 +154,6 @@ export default function StudioPage() {
       subtitleEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [liveSubtitles]);
-
-  // ── ElevenLabs 보이스 동적 패치 ──────────────
-  // 조건: ElevenLabs 엔진 선택 + 유효한 API 키 입력
-  // 동일 키로 중복 패치 방지 (elFetchedKeyRef)
-  useEffect(() => {
-    if (ttsEngine !== 'elevenlabs' || !elevenLabsApiKey.trim()) return;
-    if (elFetchedKeyRef.current === elevenLabsApiKey) return; // 이미 패치한 키
-
-    let cancelled = false;
-    setElVoicesLoading(true);
-    setElVoicesError(null);
-
-    fetchElevenLabsVoices(elevenLabsApiKey)
-      .then((voices: ElevenLabsVoice[]) => {
-        if (cancelled) return;
-        elFetchedKeyRef.current = elevenLabsApiKey;
-        const mapped = voices.map((v) => ({ id: v.voice_id, label: buildElevenLabsLabel(v), previewUrl: v.preview_url }));
-        setElVoices(mapped);
-        // 현재 선택된 voice_id가 새 목록에 없으면 첫 번째 항목으로 리셋
-        if (mapped.length > 0 && !mapped.some((v) => v.id === ttsVoice)) {
-          setTtsVoice(mapped[0].id);
-          localStorage.setItem('ttsVoice_elevenlabs', mapped[0].id);
-        }
-      })
-      .catch((err: Error) => {
-        if (cancelled) return;
-        const msg = `ElevenLabs 보이스 로드 실패: ${err.message}`;
-        setElVoicesError(msg);
-        setElVoices(ELEVENLABS_VOICE_PRESETS); // 하드코딩 프리셋 폴백
-      })
-      .finally(() => { if (!cancelled) setElVoicesLoading(false); });
-
-    return () => { cancelled = true; };
-  }, [ttsEngine, elevenLabsApiKey]); // ttsVoice는 의도적으로 제외 (패치 트리거 아님)
 
   // ── 인증 체크 + API 키 로드 ─────────────────
   useEffect(() => {
@@ -837,7 +169,7 @@ export default function StudioPage() {
       const { elevenLabsApiKey: savedElKey } = loadUserSettings(user.id);
       if (savedElKey) setElevenLabsApiKey(savedElKey);
 
-      // 1순위: 세션 캐시 (동일 세션 내 빠른 접근)
+      // 1순위: 세션 캐시 (동일 세션 내 빠른 접근 — 로그아웃 시 clearCachedApiKey로 제거됨)
       const cached = getCachedApiKey();
       if (cached) { setApiKey(cached); return; }
 
@@ -868,45 +200,7 @@ export default function StudioPage() {
       }
     }
     init();
-  }, [router]);
-
-  // ── 가상 오디오 케이블 필수 설치 검사 (Electron 전용) ──────
-  // 웹 환경에서는 getDisplayMedia 폴백으로 시스템 오디오를 캡처하므로 검사 불필요
-  // Electron 여부는 window.electronAPI.isElectron으로 판별
-  useEffect(() => {
-    if (virtualCableReady !== null) return;
-    const isElectron = !!(window as Window & { electronAPI?: { isElectron?: boolean } }).electronAPI?.isElectron;
-    if (!isElectron) {
-      setVirtualCableReady(true); // 웹 환경 → 검사 스킵, 즉시 통과
-      return;
-    }
-
-    let settled = false;
-    const timeoutId = window.setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      setVirtualCableReady(false);
-    }, DRIVER_CHECK_TIMEOUT_MS);
-
-    detectVirtualAudioDevice()
-      .then((found) => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timeoutId);
-        setVirtualCableReady(found);
-      })
-      .catch(() => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timeoutId);
-        setVirtualCableReady(false);
-      });
-
-    return () => {
-      settled = true;
-      window.clearTimeout(timeoutId);
-    };
-  }, [virtualCableReady]);
+  }, [router, setElevenLabsApiKey]);
 
   // ── 자동 오디오 설정 결과 → device state 반영 ──────────
   useEffect(() => {
@@ -914,91 +208,32 @@ export default function StudioPage() {
     setMicDeviceId(autoAudio.micId);
     setVirtualMicDeviceId(autoAudio.virtualMicId);
     setEarphoneDeviceId(autoAudio.earphoneId);
-    pipeline.setVirtualMicDevice(autoAudio.virtualMicId);
-    pipeline.setEarphoneDevice(autoAudio.earphoneId);
+    setVirtualMicDevice(autoAudio.virtualMicId);
+    setEarphoneDevice(autoAudio.earphoneId);
     setVirtualCableReady(true);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoAudio.state, autoAudio.micId, autoAudio.virtualMicId, autoAudio.earphoneId]);
+  }, [autoAudio.state, autoAudio.micId, autoAudio.virtualMicId, autoAudio.earphoneId, setVirtualMicDevice, setEarphoneDevice, setVirtualCableReady]);
 
   useEffect(() => {
     setCableDetected(autoAudio.hasVirtualRoute);
     if (autoAudio.hasVirtualRoute) setVirtualCableReady(true);
-  }, [autoAudio.hasVirtualRoute]);
-
-  // ── 음성 레벨 업데이트 ──────────────────────
-  const updateLevels = useCallback(() => {
-    if (liveActive) setMicLevel(pipeline.getMicLevel());
-    levelRafRef.current = requestAnimationFrame(updateLevels);
-  }, [pipeline, liveActive]);
-
-  useEffect(() => {
-    levelRafRef.current = requestAnimationFrame(updateLevels);
-    return () => cancelAnimationFrame(levelRafRef.current);
-  }, [updateLevels]);
+  }, [autoAudio.hasVirtualRoute, setVirtualCableReady]);
 
   // ── 로그아웃 ────────────────────────────────
   async function handleLogout() {
-    // 메모리에 올라간 API 키 즉시 초기화 — 다음 사용자가 볼 수 없도록
-    stopPreview();
-    setElevenLabsApiKey('');
-    elFetchedKeyRef.current = ''; // 다음 로그인 시 새 키로 재패치 허용
-    setElVoices(ELEVENLABS_VOICE_PRESETS); // 동적 목록 초기화
+    // 메모리·세션에 올라간 API 키 즉시 초기화 — 다음 사용자가 볼 수 없도록
+    // sessionStorage 평문 캐시는 init()이 사용자 확인 없이 신뢰하므로 반드시 제거
+    // (localStorage 암호화 사본은 userId 검증 후에만 복호화되므로 유지)
+    clearCachedApiKey();
+    setApiKey('');
+    customTTS.resetElevenLabs();
     const supabase = getSupabaseClient();
     await supabase.auth.signOut();
     router.replace('/login');
   }
 
-  // ── ElevenLabs 미리 듣기 제어 ──────────────────
-  function stopPreview() {
-    if (previewAudioRef.current) {
-      previewAudioRef.current.pause();
-      previewAudioRef.current.src = '';
-      previewAudioRef.current = null;
-    }
-    setElPreviewState('idle');
-  }
-
-  async function handlePreview() {
-    const voice = elVoices.find((v) => v.id === ttsVoice);
-    if (!voice?.previewUrl) return;
-
-    if (elPreviewState === 'playing') {
-      stopPreview();
-      return;
-    }
-
-    stopPreview();
-    setElPreviewState('loading');
-
-    const audio = new Audio(voice.previewUrl);
-    previewAudioRef.current = audio;
-
-    // ── 핵심: 이어폰 출력 장치로 명시적 고정 ──────────────
-    // VB-Cable(가상 마이크)로 라우팅되지 않도록
-    // earphoneDeviceId가 'default'이면 빈 문자열(시스템 기본값)로 설정
-    const sinkId = earphoneDeviceId !== 'default' ? earphoneDeviceId : '';
-    if (typeof (audio as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }).setSinkId === 'function') {
-      try {
-        await (audio as HTMLAudioElement & { setSinkId: (id: string) => Promise<void> }).setSinkId(sinkId);
-      } catch { /* setSinkId 실패 시 시스템 기본값으로 폴백 */ }
-    }
-
-    audio.oncanplay = () => setElPreviewState('playing');
-    audio.onended = () => { previewAudioRef.current = null; setElPreviewState('idle'); };
-    audio.onerror = () => { previewAudioRef.current = null; setElPreviewState('idle'); };
-
-    try {
-      await audio.play();
-    } catch {
-      previewAudioRef.current = null;
-      setElPreviewState('idle');
-    }
-  }
-
   // ── Gemini Live Translate: TTS 출력 모드 전환 ─────────────────────────
   function handleCustomTTSToggle(enabled: boolean) {
-    setLiveCustomTTS(enabled);
-    localStorage.setItem('liveCustomTTS', enabled ? '1' : '0');
+    customTTS.setLiveCustomTTS(enabled);
     if (enabled) {
       geminiLive.enableCustomTTS(liveCustomTTSCallbackRef.current);
     } else {
@@ -1006,27 +241,19 @@ export default function StudioPage() {
     }
   }
 
-  // ── TTS 엔진 변경 ────────────────────────────
-  function handleEngineChange(engine: TTSEngine) {
-    const defaultVoices: Record<TTSEngine, string> = {
-      edge: 'ko-KR-SunHiNeural',
-      elevenlabs: '21m00Tcm4TlvDq8ikWAM',
-      gemini: 'Aoede',
-    };
-    setTtsEngine(engine);
-    localStorage.setItem('ttsEngine', engine);
-    const savedVoice = localStorage.getItem(`ttsVoice_${engine}`);
-    const voice = savedVoice ?? defaultVoices[engine];
-    setTtsVoice(voice);
-  }
-
   // ── Gemini Live Translate: speaking 상태 폴링 (RAF) ───────────────
-  // muteUntilRef는 렌더를 트리거하지 않으므로 RAF로 직접 polling
+  // muteUntilRef는 렌더를 트리거하지 않으므로 RAF로 직접 polling — 값이 바뀔 때만 setState
   useEffect(() => {
     if (!liveActive) { setIsSpeakingLive(false); return; }
+    const muteUntilRef = geminiLive.muteUntilRef;
     let rafId: number;
+    let last: boolean | null = null;
     const poll = () => {
-      setIsSpeakingLive(Date.now() < geminiLive.muteUntilRef.current);
+      const speaking = Date.now() < muteUntilRef.current;
+      if (speaking !== last) {
+        last = speaking;
+        setIsSpeakingLive(speaking);
+      }
       rafId = requestAnimationFrame(poll);
     };
     rafId = requestAnimationFrame(poll);
@@ -1043,7 +270,7 @@ export default function StudioPage() {
       liveWasReadyRef.current = true; // 최초 ready 도달 표시
       // 임시 noop을 즉시 등록해 async 완료 전 중복 실행 방지 (race condition)
       stopLiveVADRef.current = () => {};
-      pipeline.startVADWeb(
+      startVADWeb(
         'mic',
         {
           onSpeechStart: () => setIsVADProcessing(true),
@@ -1067,7 +294,7 @@ export default function StudioPage() {
       // muteUntilRef로 Gemini 출력 중 에코 섹션 자동 차단
       if (!stopLiveSysVADRef.current && pipeline.isSysActive) {
         stopLiveSysVADRef.current = () => {}; // race condition 방지
-        pipeline.startVADWeb(
+        startVADWeb(
           'sys',
           {
             onSpeechStart: () => {},
@@ -1089,9 +316,10 @@ export default function StudioPage() {
 
     if (geminiLive.state === 'error') {
       setLiveToast(geminiLive.error ?? GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE);
-      liveStartedRef.current = false;
-      setLiveActive(false);
-      setIsVADProcessing(false);
+      // 오디오 격리: UI가 '대기'로 돌아가면 VAD(mic/sys)·WS·재연결이 전부 멈춰야 한다.
+      // (이전에는 liveActive만 꺼서 훅이 재연결하면 VAD가 계속 송출 → 이어폰/TalkSync Tx로 번역 음성 유출)
+      // handleLiveStop의 disconnect()가 state를 'disconnected'로 바꿔도 liveStartedRef=false라 이 effect는 무시.
+      handleLiveStop();
     }
 
     if (geminiLive.state === 'disconnected' && liveWasReadyRef.current) {
@@ -1107,118 +335,9 @@ export default function StudioPage() {
       stopLiveSysVADRef.current = null;
     }
     // pipeline.startVADWeb / geminiLive.sendAudioChunk 는 안정적인 useCallback refs
+    // state 전이 시점에만 실행 — vadSpeed / handleLiveStop / pipeline.isSysActive(getter)는 그 시점 값을 사용
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geminiLive.state]);
-
-  const stopBrowserTabTranslate = useCallback((
-    message?: string,
-    nextState: BrowserTabLiveTranslateState = 'stopped'
-  ) => {
-    browserTabRxStartedRef.current = false;
-    browserTabRxWasReadyRef.current = false;
-    setBrowserTabRxState(nextState === 'error' ? 'error' : 'stopping');
-
-    stopBrowserTabRxVADRef.current?.();
-    stopBrowserTabRxVADRef.current = null;
-    browserTabGeminiLive.disconnect();
-    browserTabGeminiLive.disableCustomTTS();
-
-    setBrowserTabRxState(nextState);
-    setBrowserTabRxError(message ?? null);
-  }, [browserTabGeminiLive]);
-
-  const startBrowserTabRxVAD = useCallback(async () => {
-    if (stopBrowserTabRxVADRef.current) return;
-
-    const audioTrack = browserTabAudio.audioTrack;
-    if (!audioTrack || audioTrack.readyState !== 'live') {
-      setBrowserTabRxState('error');
-      setBrowserTabRxError('오디오 track이 없습니다. 공유 창에서 오디오 공유를 켜 주세요.');
-      browserTabGeminiLive.disconnect();
-      browserTabRxStartedRef.current = false;
-      return;
-    }
-
-    const audioOnlyStream = new MediaStream([audioTrack]);
-    stopBrowserTabRxVADRef.current = () => {};
-
-    try {
-      const cleanup = await pipeline.startVADWeb(
-        audioOnlyStream,
-        {
-          onSpeechStart: () => {
-            setBrowserTabRxState('translating');
-            setBrowserTabRxError(null);
-          },
-          onSpeechFrame: (base64) => {
-            browserTabGeminiLive.sendAudioChunk(base64);
-          },
-          onSpeechEnd: () => {
-            setBrowserTabRxState('translating');
-          },
-          onVADFallback: (reason) => {
-            setBrowserTabRxError(`VAD 초기화 실패 (${reason}) — RMS 폴백으로 동작 중`);
-          },
-        },
-        // Browser Tab capture is already isolated from local speaker playback.
-        // Keep the Full Voice AEC mute gate out of this path so translated audio
-        // playback does not suppress the selected tab's incoming speech. Also
-        // stream non-silent tab frames continuously instead of relying on speech
-        // boundary detection, which can be unstable for captured media audio.
-        { ...VAD_SPEED_PRESETS[vadSpeed], streamMode: 'continuous' }
-      );
-      stopBrowserTabRxVADRef.current = cleanup;
-      setBrowserTabRxState('translating');
-    } catch (err) {
-      stopBrowserTabRxVADRef.current = null;
-      browserTabRxStartedRef.current = false;
-      browserTabGeminiLive.disconnect();
-      setBrowserTabRxState('error');
-      setBrowserTabRxError(err instanceof Error ? `VAD 시작 실패: ${err.message}` : 'VAD 시작 실패');
-    }
-  }, [browserTabAudio.audioTrack, browserTabGeminiLive, pipeline, vadSpeed]);
-
-  useEffect(() => {
-    if (!browserTabRxStartedRef.current) return;
-
-    if (browserTabGeminiLive.state === 'ready' && !stopBrowserTabRxVADRef.current) {
-      browserTabRxWasReadyRef.current = true;
-      void startBrowserTabRxVAD();
-    }
-
-    if (browserTabGeminiLive.state === 'error') {
-      const msg = browserTabGeminiLive.error ?? GEMINI_LIVE_TRANSLATE_UNAVAILABLE_MESSAGE;
-      browserTabRxStartedRef.current = false;
-      browserTabRxWasReadyRef.current = false;
-      stopBrowserTabRxVADRef.current?.();
-      stopBrowserTabRxVADRef.current = null;
-      setBrowserTabRxState('error');
-      setBrowserTabRxError(msg);
-    }
-
-    if (browserTabGeminiLive.state === 'disconnected' && browserTabRxWasReadyRef.current) {
-      browserTabRxStartedRef.current = false;
-      browserTabRxWasReadyRef.current = false;
-      stopBrowserTabRxVADRef.current?.();
-      stopBrowserTabRxVADRef.current = null;
-      setBrowserTabRxState('stopped');
-      setBrowserTabRxError('Gemini Live Translate 연결이 종료되었습니다.');
-    }
-  }, [browserTabGeminiLive.state, browserTabGeminiLive.error, startBrowserTabRxVAD]);
-
-  useEffect(() => {
-    if (!browserTabRxStartedRef.current) return;
-    if (browserTabAudio.state !== 'sharing' || !browserTabAudio.hasAudioTrack) {
-      stopBrowserTabTranslate('공유가 중단되어 Browser Tab Live Translate를 정리했습니다.', 'stopped');
-    }
-  }, [browserTabAudio.state, browserTabAudio.hasAudioTrack, stopBrowserTabTranslate]);
-
-  useEffect(() => () => {
-    stopBrowserTabRxVADRef.current?.();
-    stopBrowserTabRxVADRef.current = null;
-    browserTabGeminiLive.disconnect();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // ── Gemini Live Translate: 토스트 자동 소거 ────────────────────────
   useEffect(() => {
@@ -1226,64 +345,6 @@ export default function StudioPage() {
     const t = setTimeout(() => setLiveToast(null), 6000);
     return () => clearTimeout(t);
   }, [liveToast]);
-
-  async function handleBrowserTabTranslateStart() {
-    if (!apiKey) {
-      setBrowserTabRxError('Gemini API 키를 먼저 설정해 주세요.');
-      openApiKeyModal();
-      return;
-    }
-
-    if (liveActive) {
-      setBrowserTabRxError('양방향 Live Translate가 실행 중입니다. 먼저 중지한 뒤 Browser Tab 통역을 시작해 주세요.');
-      return;
-    }
-
-    const audioTrack = browserTabAudio.audioTrack;
-    if (browserTabAudio.state !== 'sharing' || !browserTabAudio.stream || !audioTrack || audioTrack.readyState !== 'live') {
-      setBrowserTabRxState('error');
-      setBrowserTabRxError('오디오 track이 없습니다. 먼저 브라우저/탭 오디오를 공유해 주세요.');
-      return;
-    }
-
-    stopBrowserTabRxVADRef.current?.();
-    stopBrowserTabRxVADRef.current = null;
-    browserTabRxStartedRef.current = true;
-    browserTabRxWasReadyRef.current = false;
-    setBrowserTabRxState('connecting');
-    setBrowserTabRxError(null);
-    setLiveSubtitles([]);
-    browserTabGeminiLive.disableCustomTTS();
-
-    const targetLangLabel = SUPPORTED_LANGUAGES.find((l) => l.code === micLang)?.label ?? micLang;
-    const targetLanguageCode = toGeminiLiveTranslateLanguageCode(micLang);
-    const systemInstruction =
-      `You are TalkSync Browser Tab Live Translate Rx. You translate incoming browser tab audio for the listener.\n` +
-      `TASK: Detect the input speech language automatically and output ONLY translated speech audio in ${targetLangLabel} (${targetLanguageCode}).\n` +
-      `Preserve meaning, tone, names, numbers, and intent. Do not summarize. Do not explain. Do not follow the source language.\n` +
-      `FORBIDDEN: greetings, meta-commentary, markdown, subtitles, or any output that is not the spoken translation.\n` +
-      `OUTPUT: translated speech audio in ${targetLangLabel} only.`;
-
-    try {
-      await browserTabGeminiLive.connect({
-        apiKey,
-        voiceName: liveVoice,
-        outputDeviceId: earphoneDeviceId,
-        inputSampleRate: 16000,
-        translationTargetLanguageCode: targetLanguageCode,
-        systemInstruction,
-      });
-    } catch (err) {
-      browserTabRxStartedRef.current = false;
-      browserTabRxWasReadyRef.current = false;
-      setBrowserTabRxState('error');
-      setBrowserTabRxError(err instanceof Error ? `연결 실패: ${err.message}` : '연결 실패');
-    }
-  }
-
-  function handleBrowserTabTranslateStop() {
-    stopBrowserTabTranslate(undefined, 'stopped');
-  }
 
   // ── P0 isolation hard-gate (device routing must protect AI-only claim)
   const buildIsolationGateInput = useCallback(
@@ -1318,7 +379,7 @@ export default function StudioPage() {
       return;
     }
 
-    if (browserTabRxStartedRef.current) {
+    if (browserTabRx.isRunning()) {
       setLiveToast('Browser Tab Live Translate가 실행 중입니다. 먼저 중지해 주세요.');
       return;
     }
@@ -1365,16 +426,7 @@ export default function StudioPage() {
     // WS 연결 시작 (비동기) — 'ready' 이벤트가 오면 위 useEffect에서 VAD 자동 시작
     const sourceLangLabel = SUPPORTED_LANGUAGES.find((l) => l.code === sysLang)?.label ?? sysLang;
     const targetLangLabel = SUPPORTED_LANGUAGES.find((l) => l.code === micLang)?.label ?? micLang;
-    const systemInstruction =
-      `You are a silent translation engine. You do NOT speak. You do NOT explain. You do NOT greet. You do NOT use markdown.\n` +
-      `TASK: When you hear speech, detect its language and output ONLY the translated text.\n` +
-      `- If the speaker uses ${sourceLangLabel}: output the ${targetLangLabel} translation only.\n` +
-      `- If the speaker uses ${targetLangLabel}: output the ${sourceLangLabel} translation only.\n` +
-      `FORBIDDEN (instant failure if violated):\n` +
-      `- Any meta-commentary ("Translating...", "The translation is...", "I've translated...")\n` +
-      `- Any greeting, filler, explanation, or markdown formatting\n` +
-      `- Any output that is not the raw translated sentence\n` +
-      `OUTPUT FORMAT: [translated sentence only — nothing else]`;
+    const systemInstruction = buildBidirectionalInstruction(sourceLangLabel, targetLangLabel);
 
     geminiLive.connect({
       apiKey,
@@ -1411,10 +463,10 @@ export default function StudioPage() {
   const driverNoticeVisible = !fullVoiceReplacementReady;
   const isolationDisabledReason =
     isolationGateDisabledReason(isolationGate) || '양방향 치환 모드는 드라이버 필요';
-  const browserTabPanelLiveState: BrowserTabLiveTranslateState =
-    browserTabRxState === 'idle' && browserTabAudio.hasAudioTrack
-      ? 'captured'
-      : browserTabRxState;
+  const livePhase: LivePhase =
+    isSpeakingLive   ? 'speaking'
+    : isVADProcessing  ? 'processing'
+    :                   'listening';
 
   // 웹 환경(비 Electron) — 프로덕션은 다운로드 안내 유지, dev localhost는 Browser Tab capture smoke 허용
   if (isElectron === false && !ENABLE_BROWSER_TAB_CAPTURE_WEB_DEV) return <WebOnlyFallback />;
@@ -1422,10 +474,10 @@ export default function StudioPage() {
   return (
     <>
       {/* ElevenLabs 보이스 패치 에러 토스트 */}
-      {elVoicesError && (
+      {customTTS.elVoicesError && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-[150] bg-red-700 text-white px-4 py-3 rounded-2xl shadow-2xl text-sm flex items-center gap-2 max-w-sm">
           <span className="text-base">🔑</span>
-          <span>{elVoicesError} — 기본 프리셋으로 대체됩니다</span>
+          <span>{customTTS.elVoicesError} — 저장된 음성을 그대로 사용합니다</span>
         </div>
       )}
 
@@ -1450,64 +502,16 @@ export default function StudioPage() {
 
       <div className="flex flex-col h-screen bg-zinc-50">
         {/* ── 헤더 ── */}
-        <header className="flex items-center justify-between px-5 py-3 bg-white border-b border-zinc-100 shadow-sm">
-          <div className="flex items-center gap-3">
-            <span className="text-xl font-bold text-zinc-900 tracking-tight">TalkSync</span>
-            <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
-              liveActive ? 'bg-indigo-50 text-indigo-700' : 'bg-zinc-100 text-zinc-500'
-            }`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${liveActive ? 'bg-indigo-500 animate-pulse' : 'bg-zinc-300'}`} />
-              {liveActive ? 'Live 통역 중' : '대기'}
-            </div>
-          </div>
-
-          {/* 언어 선택 */}
-          <div className="flex items-center gap-2">
-            <select
-              value={micLang}
-              onChange={(e) => setMicLang(e.target.value)}
-              disabled={liveActive}
-              className="text-sm bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2 text-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-900/20 transition disabled:opacity-50"
-            >
-              {SUPPORTED_LANGUAGES.map((l) => (
-                <option key={l.code} value={l.code}>{l.flag} {l.label}</option>
-              ))}
-            </select>
-            <span className="text-zinc-400 text-base">⇄</span>
-            <select
-              value={sysLang}
-              onChange={(e) => setSysLang(e.target.value)}
-              disabled={liveActive}
-              className="text-sm bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2 text-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-900/20 transition disabled:opacity-50"
-            >
-              {SUPPORTED_LANGUAGES.map((l) => (
-                <option key={l.code} value={l.code}>{l.flag} {l.label}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => { void openApiKeyModal(); }}
-              className={`flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl transition ${
-                apiKey
-                  ? 'text-green-700 bg-green-50 hover:bg-green-100 border border-green-200'
-                  : 'text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200'
-              }`}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${apiKey ? 'bg-green-500' : 'bg-amber-400 animate-pulse'}`} />
-              {apiKey
-                ? `🔑 AIza···${apiKey.slice(-4)}`
-                : '🔑 API 키 미설정'}
-            </button>
-            <button
-              onClick={handleLogout}
-              className="text-xs text-zinc-400 hover:text-zinc-600 px-3 py-2 rounded-xl hover:bg-zinc-100 transition"
-            >
-              로그아웃
-            </button>
-          </div>
-        </header>
+        <StudioHeader
+          liveActive={liveActive}
+          micLang={micLang}
+          sysLang={sysLang}
+          apiKey={apiKey}
+          onMicLangChange={setMicLang}
+          onSysLangChange={setSysLang}
+          onOpenApiKey={openApiKeyModal}
+          onLogout={handleLogout}
+        />
 
         {/* ── 메인 콘텐츠 ── */}
         <div className="flex flex-1 overflow-hidden">
@@ -1515,95 +519,15 @@ export default function StudioPage() {
           <div className="flex-1 flex flex-col overflow-hidden p-4">
             <div className="flex-1 overflow-y-auto space-y-3 pr-1">
               {liveActive ? (
-                /* ── V2 실시간 자막 ── */
-                liveSubtitles.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center h-full gap-4">
-                    <LiveStatusIndicator phase={isSpeakingLive ? 'speaking' : isVADProcessing ? 'processing' : 'listening'} />
-                    <p className="text-sm text-zinc-400">상대방 음성을 기다리는 중...</p>
-                  </div>
-                ) : (
-                  <div className="space-y-3 py-2">
-                    {liveSubtitles.map((s) => (
-                      <div key={s.id} className="rounded-2xl p-4 bg-white border border-zinc-100 shadow-sm">
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-xs text-zinc-400">🎧 Gemini 통역</span>
-                          <span className="text-[10px] text-zinc-300">
-                            {new Date(s.timestamp).toLocaleTimeString()}
-                          </span>
-                        </div>
-                        <p className="text-sm font-medium leading-relaxed text-zinc-900">{s.text}</p>
-                      </div>
-                    ))}
-                    <div ref={subtitleEndRef} />
-                  </div>
-                )
+                <SubtitleFeed subtitles={liveSubtitles} phase={livePhase} endRef={subtitleEndRef} />
               ) : (
-                /* ── 사용 가이드 ── */
-                <div className="flex flex-col items-center justify-center h-full gap-6 py-8">
-                  <div className="w-16 h-16 bg-white border border-zinc-100 rounded-3xl flex items-center justify-center shadow-sm">
-                    <span className="text-3xl">🎙</span>
-                  </div>
-
-                  {!apiKey && (
-                    <button
-                      onClick={() => { void openApiKeyModal(); }}
-                      className="flex items-center gap-2 px-4 py-2 bg-amber-50 border border-amber-200 text-amber-700 text-sm rounded-xl hover:bg-amber-100 transition"
-                    >
-                      ⚠ Gemini API 키 설정 필요
-                    </button>
-                  )}
-
-                  <div className="w-full max-w-xl space-y-2">
-                    {[
-                      {
-                        icon: '🔌',
-                        title: 'TalkSync 가상 오디오 감지',
-                        desc:
-                          autoAudio.state === 'ready'
-                            ? 'TalkSync 전용 장치가 자동으로 선택됐어요'
-                            : autoAudio.state === 'manual-review'
-                              ? '가상 오디오 장치가 감지됐지만 수동 확인이 필요해요'
-                              : '가상 오디오 드라이버가 감지되지 않았어요 — 설치 후 새로고침하세요',
-                        done: autoAudio.state === 'ready',
-                        action: !cableDetected ? { label: '드라이버 설치', href: 'https://vb-audio.com/Cable/' } : undefined,
-                      },
-                      {
-                        icon: '🎧',
-                        title: '이어폰 선택',
-                        desc: earphoneDeviceId !== 'default' ? '이어폰이 선택됐어요' : '아래 "이어폰 출력" 드롭다운에서 본인 헤드셋을 선택하세요',
-                        done: earphoneDeviceId !== 'default',
-                      },
-                      {
-                        icon: '💬',
-                        title: 'Discord 출력을 TalkSync Virtual Audio Cable로 변경',
-                        desc: 'Discord → ⚙️ 설정 → 음성 및 비디오 → 출력 장치 → "TalkSync Virtual Audio Cable" 선택',
-                        done: false,
-                      },
-                      {
-                        icon: '🚀',
-                        title: 'Gemini Live Translate 시작',
-                        desc: '상단 패널에서 [Live Translate 시작] 버튼을 누르세요',
-                        done: false,
-                      },
-                    ].map(({ icon, title, desc, done, action }) => (
-                      <div key={title} className={`flex items-start gap-3 p-4 rounded-2xl border transition-all ${
-                        done ? 'bg-green-50 border-green-100' : 'bg-white border-zinc-100'
-                      }`}>
-                        <span className="text-xl mt-0.5">{done ? '✅' : icon}</span>
-                        <div className="flex-1 min-w-0">
-                          <p className={`text-sm font-semibold ${done ? 'text-green-700' : 'text-zinc-800'}`}>{title}</p>
-                          <p className="text-xs text-zinc-400 mt-0.5 leading-relaxed">{desc}</p>
-                          {action && (
-                            <a href={action.href} target="_blank" rel="noopener noreferrer"
-                              className="inline-block mt-2 text-xs font-medium text-blue-600 hover:underline">
-                              {action.label} →
-                            </a>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                <UsageGuide
+                  apiKeyReady={Boolean(apiKey)}
+                  autoAudioState={autoAudio.state}
+                  cableDetected={cableDetected}
+                  earphoneSelected={earphoneDeviceId !== 'default'}
+                  onOpenApiKey={openApiKeyModal}
+                />
               )}
             </div>
           </div>
@@ -1623,33 +547,7 @@ export default function StudioPage() {
         <div className="bg-white border-t border-zinc-100 px-5 py-4 shadow-lg">
 
           {driverNoticeVisible && (
-            <div className="mb-4 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
-              <span className="text-amber-500 text-base mt-0.5">⚠</span>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-amber-800">
-                  {driverCheckInProgress
-                    ? 'TalkSync 가상 오디오 드라이버를 확인 중입니다'
-                    : 'TalkSync 가상 오디오 드라이버가 감지되지 않았습니다'}
-                </p>
-                <p className="text-[11px] text-amber-700 mt-0.5 leading-relaxed">
-                  Browser Tab Translate Mode는 드라이버 없이 사용할 수 있습니다. 양방향 치환 모드와 회의방 송출은 TalkSync Virtual Speaker(Rx) / Microphone(Tx) 감지 후 활성화됩니다.
-                </p>
-              </div>
-              <div className="flex gap-2 shrink-0">
-                <button
-                  onClick={autoAudio.rescan}
-                  className="text-xs px-3 py-1.5 bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-lg transition-colors"
-                >
-                  재검사
-                </button>
-                <button
-                  onClick={() => openExternal('https://vb-audio.com/Cable/')}
-                  className="text-xs px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg transition-colors font-medium"
-                >
-                  설치하기
-                </button>
-              </div>
-            </div>
+            <DriverNotice checking={driverCheckInProgress} onRescan={autoAudio.rescan} />
           )}
 
           {/* Browser Tab Translate Mode — capture-only MVP */}
@@ -1661,20 +559,13 @@ export default function StudioPage() {
             hasAudioTrack={browserTabAudio.hasAudioTrack}
             targetLanguageLabel={listenLanguageLabel}
             txLanguageLabel={meetingVoiceLanguageLabel}
-            liveState={browserTabPanelLiveState}
-            liveError={browserTabRxError}
+            liveState={browserTabRx.panelLiveState}
+            liveError={browserTabRx.error}
             apiKeyReady={Boolean(apiKey)}
-            onStartCapture={() => {
-              setBrowserTabRxState('idle');
-              setBrowserTabRxError(null);
-              void browserTabAudio.startCapture();
-            }}
-            onStopCapture={() => {
-              stopBrowserTabTranslate(undefined, 'stopped');
-              browserTabAudio.stopCapture();
-            }}
-            onStartTranslate={handleBrowserTabTranslateStart}
-            onStopTranslate={handleBrowserTabTranslateStop}
+            onStartCapture={browserTabRx.startCapture}
+            onStopCapture={browserTabRx.stopCapture}
+            onStartTranslate={() => browserTabRx.start({ apiKey, liveActive, micLang, liveVoice, earphoneDeviceId })}
+            onStopTranslate={browserTabRx.stop}
           />
 
           {/* Gemini Live Translate V2 통역 패널 */}
@@ -1682,13 +573,10 @@ export default function StudioPage() {
             <GeminiLivePanel
               wsState={geminiLive.state}
               liveActive={liveActive}
-              livePhase={
-                isSpeakingLive   ? 'speaking'
-                : isVADProcessing  ? 'processing'
-                :                   'listening'
-              }
+              livePhase={livePhase}
               liveVoice={liveVoice}
               liveError={null}
+              txWarning={geminiLive.txError}
               liveCustomTTS={liveCustomTTS}
               disabled={!fullVoiceReplacementReady}
               disabledReason={isolationDisabledReason}
@@ -1702,199 +590,30 @@ export default function StudioPage() {
           </div>
 
           {/* P0 isolation preflight checklist */}
-          {!liveActive && (
-            <div className="mb-4 rounded-2xl border border-zinc-200 bg-white px-4 py-3">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <p className="text-xs font-semibold text-zinc-700">원음 격리 사전 점검 (P0)</p>
-                <span
-                  className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
-                    isolationGate.ok
-                      ? 'bg-emerald-50 text-emerald-700'
-                      : 'bg-amber-50 text-amber-700'
-                  }`}
-                >
-                  {isolationGate.ok ? '통과' : '차단'}
-                </span>
-              </div>
-              <ul className="space-y-1.5">
-                {isolationGate.checks.map((check) => (
-                  <li key={check.id} className="flex items-start gap-2 text-[11px] leading-relaxed">
-                    <span className={check.pass ? 'text-emerald-600' : 'text-amber-600'}>
-                      {check.pass ? '✓' : '○'}
-                    </span>
-                    <span className={check.pass ? 'text-zinc-600' : 'text-zinc-800 font-medium'}>
-                      {check.label}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-              {!isolationGate.ok && isolationGate.blockers.length > 0 && (
-                <div className="mt-2 pt-2 border-t border-zinc-100 space-y-1">
-                  {isolationGate.blockers.slice(0, 3).map((b) => (
-                    <p key={b.code} className="text-[11px] text-amber-700 leading-relaxed">
-                      · {b.message}
-                    </p>
-                  ))}
-                </div>
-              )}
-              <p className="mt-2 text-[10px] text-zinc-400 leading-relaxed">
-                Browser Tab 듣기 모드는 드라이버 없이 가능합니다. 양방향 치환(상대에게 AI 음성만 송출)만 이 게이트를 통과해야 시작합니다.
-              </p>
-            </div>
-          )}
+          {!liveActive && <IsolationChecklist gate={isolationGate} />}
 
           {/* ── 오디오 자동 설정 패널 ── */}
           <div className="flex items-center justify-between gap-4 flex-wrap">
-            <div className="flex-1">
+            <AudioSetupPanel
+              autoAudio={autoAudio}
+              manualSelectors={
+                <ManualDeviceSelectors
+                  inputs={pipeline.devices.inputs}
+                  outputs={pipeline.devices.outputs}
+                  micDeviceId={micDeviceId}
+                  virtualMicDeviceId={virtualMicDeviceId}
+                  earphoneDeviceId={earphoneDeviceId}
+                  onMicChange={(id) => { setMicDeviceId(id); setMicDevice(id); }}
+                  onVirtualMicChange={(id) => { setVirtualMicDeviceId(id); setVirtualMicDevice(id); }}
+                  onEarphoneChange={(id) => { setEarphoneDeviceId(id); setEarphoneDevice(id); }}
+                />
+              }
+            />
 
-              {/* 스캔 중 */}
-              {autoAudio.state === 'scanning' && (
-                <div className="flex items-center gap-2.5 py-2.5 px-4 bg-zinc-50 border border-zinc-200 rounded-2xl">
-                  <svg className="animate-spin w-4 h-4 text-zinc-400" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-                  </svg>
-                  <span className="text-sm text-zinc-500">오디오 장치 스캔 중...</span>
-                </div>
-              )}
-
-              {/* 자동 설정 완료 */}
-              {autoAudio.state === 'ready' && (
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-2.5 py-2.5 px-4 bg-emerald-50 border border-emerald-200 rounded-2xl">
-                    <span className="text-emerald-600 text-base">✅</span>
-                    <span className="text-sm font-medium text-emerald-700">TalkSync 전용 오디오 라우팅 자동 설정 완료</span>
-                    <button
-                      onClick={() => setShowAdvancedDevices((v) => !v)}
-                      className="ml-auto text-[11px] text-zinc-400 hover:text-zinc-600 underline underline-offset-2 transition-colors"
-                    >
-                      {showAdvancedDevices ? '접기' : '고급 설정'}
-                    </button>
-                  </div>
-
-                  {/* 장치 뱃지 */}
-                  <div className="flex gap-2 flex-wrap px-1">
-                    <DeviceBadge icon="🎧" label="입력" value={autoAudio.labels.mic} />
-                    <DeviceBadge icon="📡" label="송출" value={autoAudio.labels.virtualMic} />
-                    <DeviceBadge icon="🔊" label="이어폰" value={autoAudio.labels.earphone} />
-                  </div>
-
-                  {/* 고급 설정 (수동 오버라이드) */}
-                  {showAdvancedDevices && (
-                    <div className="flex gap-3 flex-wrap pt-1 pl-1">
-                      <DeviceSelector
-                        label="마이크 입력"
-                        devices={pipeline.devices.inputs}
-                        value={micDeviceId}
-                        onChange={(id) => { setMicDeviceId(id); pipeline.setMicDevice(id); }}
-                      />
-                      <DeviceSelector
-                        label="가상 마이크 출력"
-                        devices={pipeline.devices.outputs}
-                        value={virtualMicDeviceId}
-                        onChange={(id) => { setVirtualMicDeviceId(id); pipeline.setVirtualMicDevice(id); }}
-                        requiresCable
-                      />
-                      <DeviceSelector
-                        label="이어폰 출력"
-                        devices={pipeline.devices.outputs}
-                        value={earphoneDeviceId}
-                        onChange={(id) => { setEarphoneDeviceId(id); pipeline.setEarphoneDevice(id); }}
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* fallback 감지 — 자동 바인딩 금지 */}
-              {autoAudio.state === 'manual-review' && (
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-start gap-2.5 py-2.5 px-4 bg-amber-50 border border-amber-200 rounded-2xl">
-                    <span className="text-amber-500 text-base mt-0.5">⚠️</span>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-amber-800">가상 오디오 장치 수동 확인 필요</p>
-                      <p className="text-[11px] text-amber-600 mt-0.5 leading-relaxed">
-                        {autoAudio.bindingMode === 'legacy-talksync'
-                          ? 'TalkSync legacy label은 감지됐지만 Speaker(Rx) / Microphone(Tx) 방향이 명확하지 않아요.'
-                          : '일반 virtual/cable 장치는 자동 선택하지 않습니다. 아래 장치를 직접 확인해 주세요.'}
-                      </p>
-                      {autoAudio.warnings.map((warning) => (
-                        <p key={warning} className="text-[11px] text-amber-700 mt-1 leading-relaxed">
-                          {warning}
-                        </p>
-                      ))}
-                    </div>
-                    <button
-                      onClick={autoAudio.rescan}
-                      className="text-xs px-3 py-1.5 bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-lg transition-colors shrink-0"
-                    >
-                      재검사
-                    </button>
-                  </div>
-
-                  <div className="flex gap-2 flex-wrap px-1">
-                    <DeviceBadge icon="🎧" label="입력" value={autoAudio.labels.mic} />
-                    <DeviceBadge icon="📡" label="송출 후보" value={autoAudio.labels.virtualMic} />
-                    <DeviceBadge icon="🔊" label="이어폰" value={autoAudio.labels.earphone} />
-                  </div>
-
-                  <div className="flex gap-3 flex-wrap pt-1 pl-1">
-                    <DeviceSelector
-                      label="마이크 입력"
-                      devices={pipeline.devices.inputs}
-                      value={micDeviceId}
-                      onChange={(id) => { setMicDeviceId(id); pipeline.setMicDevice(id); }}
-                    />
-                    <DeviceSelector
-                      label="가상 마이크 출력"
-                      devices={pipeline.devices.outputs}
-                      value={virtualMicDeviceId}
-                      onChange={(id) => { setVirtualMicDeviceId(id); pipeline.setVirtualMicDevice(id); }}
-                      requiresCable
-                    />
-                    <DeviceSelector
-                      label="이어폰 출력"
-                      devices={pipeline.devices.outputs}
-                      value={earphoneDeviceId}
-                      onChange={(id) => { setEarphoneDeviceId(id); pipeline.setEarphoneDevice(id); }}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* 가상 케이블 없음 */}
-              {(autoAudio.state === 'no-cable' || autoAudio.state === 'error') && (
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-2.5 py-2.5 px-4 bg-amber-50 border border-amber-200 rounded-2xl">
-                    <span className="text-amber-500 text-base">⚠️</span>
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-amber-800">가상 오디오 드라이버 설치가 필요합니다</p>
-                      <p className="text-[11px] text-amber-600 mt-0.5">Discord/Teams로 번역 음성을 전달하려면 TalkSync 가상 오디오 드라이버가 필요해요</p>
-                    </div>
-                    <div className="flex gap-2 shrink-0">
-                      <button
-                        onClick={() => openExternal('https://vb-audio.com/Cable/')}
-                        className="text-xs px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg transition-colors font-medium"
-                      >
-                        설치하기
-                      </button>
-                      <button
-                        onClick={autoAudio.rescan}
-                        className="text-xs px-3 py-1.5 bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-lg transition-colors"
-                      >
-                        재검사
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-            </div>
-
-            {/* 오른쪽: 마이크 레벨 */}
+            {/* 오른쪽: 마이크 레벨 (자체 RAF — 페이지 리렌더 없음) */}
             <div className="flex items-center gap-2 shrink-0">
               <span className="text-xs text-zinc-400">레벨</span>
-              <LevelBar level={micLevel} color="bg-zinc-900" />
+              <MicLevelMeter getLevel={getMicLevel} active={liveActive} color="bg-zinc-900" />
             </div>
           </div>
 

@@ -74,7 +74,7 @@ function writeWavHeader(view: DataView, pcmByteLen: number, spec: WavSpec): void
  * Web Audio API Float32 샘플 [-1, 1] → Int16 LE PCM 바이트 배열
  * 클리핑(±32767) 처리 포함
  */
-export function float32ToInt16Bytes(float32: Float32Array): Uint8Array {
+function float32ToInt16Bytes(float32: Float32Array): Uint8Array {
   const int16Buf = new ArrayBuffer(float32.length * 2);
   const int16    = new Int16Array(int16Buf);
   for (let i = 0; i < float32.length; i++) {
@@ -95,7 +95,7 @@ export function float32ToInt16Bytes(float32: Float32Array): Uint8Array {
  * @param spec       샘플레이트 / 채널 / 비트 깊이
  * @returns          audio/wav MIME Blob
  */
-export function buildWavBlob(pcmChunks: Uint8Array[], spec: WavSpec): Blob {
+function buildWavBlob(pcmChunks: Uint8Array[], spec: WavSpec): Blob {
   // 전체 PCM 바이트 합산
   const totalPcmBytes = pcmChunks.reduce((acc, c) => acc + c.byteLength, 0);
   const wavBuf = new ArrayBuffer(44 + totalPcmBytes);
@@ -132,7 +132,7 @@ type ElectronAPI = {
  * @param blob      buildWavBlob()이 반환한 audio/wav Blob
  * @param filename  저장 파일명 (예: "TalkSync_통역_20260402_085510.wav")
  */
-export async function saveWavFile(blob: Blob, filename: string): Promise<void> {
+async function saveWavFile(blob: Blob, filename: string): Promise<void> {
   const electronAPI = (window as Window & { electronAPI?: ElectronAPI }).electronAPI;
 
   if (electronAPI?.saveWav) {
@@ -166,7 +166,7 @@ export async function saveWavFile(blob: Blob, filename: string): Promise<void> {
  * "TalkSync_통역_YYYYMMDD_HHMMSS_mmm.wav" 형태의 고유 파일명 생성
  * 밀리초 접미사로 같은 초에 생성된 파일 충돌 방지
  */
-export function makeTalkSyncFilename(prefix = 'TalkSync_통역'): string {
+function makeTalkSyncFilename(prefix = 'TalkSync_통역'): string {
   const now = new Date();
   const pad2 = (n: number) => String(n).padStart(2, '0');
   const pad3 = (n: number) => String(n).padStart(3, '0');

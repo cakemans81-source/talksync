@@ -1,36 +1,39 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TalkSync
 
-## Getting Started
+Windows에서 브라우저 탭·회의 앱·Discord 등의 오디오를 실시간으로 번역하는 음성 통역 앱 (Next.js 웹 + Electron 데스크톱).
 
-First, run the development server:
+## 스택
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+- Next.js 16 (App Router, 자체 딕셔너리 i18n: `messages/*.json`) / React 19 / Tailwind CSS 4
+- Electron 34 + electron-builder (Windows NSIS 인스톨러)
+- Gemini Live (`@google/generative-ai`), VAD (`@ricky0123/vad-web`), Supabase
+
+## 주요 스크립트
+
+| 명령 | 설명 |
+| --- | --- |
+| `npm run dev` | Next.js 개발 서버 (http://localhost:3000) |
+| `npm run electron:dev` | 개발 서버 + Electron 동시 실행 |
+| `npm run build:app` | Electron용 정적 빌드(`out/`) + 메인 프로세스 컴파일 |
+| `npm run package:all` | `build:app` 후 Windows 인스톨러 생성 (`dist-electron/`) |
+| `npm test` | Isolation hard-gate 테스트 |
+| `npm run lint` | ESLint |
+
+## 디렉터리
+
+```
+electron/       Electron 메인/프리로드 프로세스
+src/app/        Next.js 라우트 (landing [locale], studio, auth 등)
+src/hooks/      오디오 캡처·라우팅·Gemini Live 훅
+src/lib/        공용 로직 (릴리스 URL, isolation hard-gate 등)
+src/components/ UI 컴포넌트 (audio, landing)
+messages/       다국어 문구 (ko, en, zh, de)
+docs/           기획·릴리스·드라이버 문서
+scripts/        서명·릴리스 빌드·드라이버 관련 스크립트
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 문서
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+기획·진행 상태의 기준 문서: `docs/MASTER_CONTEXT.md`
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+릴리스/서명 절차: `docs/release/`

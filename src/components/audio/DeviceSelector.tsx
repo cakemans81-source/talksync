@@ -2,6 +2,7 @@
 
 import { type AudioDevice } from '@/hooks/useAudioRouter';
 import { isVirtualAudioDevice } from '@/lib/audioDeviceBinding';
+import { VIRTUAL_AUDIO_DRIVER_URL } from '@/lib/release';
 
 type Props = {
   label: string;
@@ -39,7 +40,7 @@ export function DeviceSelector({ label, devices, value, onChange, hint, requires
             <p className="font-medium mb-0.5">가상 오디오 드라이버 미설치</p>
             <p>Discord/Teams 마이크 연결에 필요해요.</p>
             <a
-              href="https://vb-audio.com/Cable/"
+              href={VIRTUAL_AUDIO_DRIVER_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 mt-1.5 text-amber-800 font-medium underline underline-offset-2 hover:text-amber-900"
