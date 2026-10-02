@@ -49,3 +49,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# M1 benchmark harness: local audio data and run results (manifests stay committed)
+/tools/bench/data/
+/tools/bench/results/
