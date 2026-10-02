@@ -1,7 +1,7 @@
 ================================================================================
 TALKSYNC — MASTER CONTEXT
 현재 확정 기획·기술·제품 운영 기준
-기준일: 2026-07-18
+기준일: 2026-07-18 (최종 갱신 2026-10-02 — 로드맵 재정비)
 ================================================================================
 
 0. 문서 목적
@@ -166,6 +166,15 @@ TalkSync의 최종형이다.
 4. 확정된 상품 구조
 ================================================================================
 
+[2026-10 갱신]
+- Free = 사용자 PC 로컬 오픈소스 엔진 (API 키 불필요)
+- Pro  = 회사 부담 Gemini Managed + 사용량 과금 (충전식 크레딧)
+- BYOK(4.2)는 후순위: 기본 경로에서 제외하고 개발자 플래그로만 유지
+- 아래 4.x 소절은 유효한 참고 기준으로 유지하되, 일정·범위·과금 상세는
+  docs/talksync/2026-10-roadmap.md 를 따른다.
+- (2026-10) 아래 Free v1 Tx/Rx·Safe PTT 정의는 P1 Tx 이후 최종형 기준이다.
+  공개 베타 Free는 Rx 전용, 모든 언어 → 사용자 언어, 언어 등급제(로드맵 5.1).
+
 4.1 Free — Local Relay
 --------------------------------------------------------------------------------
 
@@ -216,7 +225,7 @@ Free를 다음과 같이 홍보하지 않는다.
 받기: 영어 원음 + 한국어 자막
 
 
-4.2 Pro BYOK
+4.2 Pro BYOK (후순위)
 --------------------------------------------------------------------------------
 
 사용자가 자신의 Gemini·OpenAI 또는 지원 provider API 키를 연결한다.
@@ -245,6 +254,8 @@ API 발급과 설정을 어려워하는 사용자를 위한 관리형 요금제�
 
 구조:
 - TalkSync 서버가 공식 provider API를 호출
+- (2026-10) 베타 구조: 서버(mint-live-token)는 1회용 ephemeral token만 발급,
+  앱이 Gemini에 직접 연결. 회사 키는 Edge Function에만 (로드맵 4.1~4.2).
 - 사용자별 사용량을 계량
 - TalkSync가 사용자에게 원화 또는 정해진 단위로 과금
 - 외부 API 원가, 결제 수수료, 장애·환불·악용 위험을 포함해 가격 책정
@@ -379,6 +390,8 @@ Live Mode는 다음 조건을 충족한 뒤 검토한다.
 ================================================================================
 
 현재 후보는 실제 Windows 벤치마크 전까지 확정 엔진이 아니다.
+(2026-10: M1 후보는 로드맵 2.3 기준. Tencent HY-MT 계열은 라이선스 지역 한국 제외
+보고(미검증) — 라이선스 확인 전 후보 제외)
 
 
 6.1 Track A — Direct Speech Translation
@@ -580,6 +593,8 @@ provider 추상화 범위:
 - EV 인증서만으로 최신 Windows 커널 신뢰를 직접 완성한다고 가정하지 않는다.
 - Microsoft Hardware Dev Center / Partner Center 제출 경로를 검토한다.
 - 사용자 직접 설치형 제품은 Attestation Signing을 우선 검토한다.
+  (2026-10 정정: MS 문서상 Attestation은 테스트 목적 안내 → M0는 Code 52·내부
+  테스트용, 공개 배포 경로는 M2까지 결정, 로드맵 R10)
 - 최신 Windows 정책은 제출 직전에 공식 문서로 재검증한다.
 
 필요 검증:
@@ -707,24 +722,38 @@ Virtual Speaker 또는 캡처 계층:
 13. 출시 및 개발 순서
 ================================================================================
 
-현재 권장 순서:
+[2026-10 재정비 — 신규 순서]
+상세: docs/talksync/2026-10-roadmap.md
 
-Phase 1 — Browser Tab Live Translate Rx MVP
+1차 목표는 실사용자 검증이다. 베타 범위는 Rx만이며,
+Tx는 드라이버 서명 후 진행한다. 2026-10-05(월) 시작, A안(무료·유료 동시 베타).
+
+M0 기반 정리            10/05~10/09
+M1 두 트랙 병렬         10/12~10/23  (10/23 무료 엔진 Go/No-Go 판정)
+M2 두 트랙 통합         10/26~11/13
+M3 클로즈드 베타        11/16~11/20  (10~30명)
+M4 공개 베타 v0.2.0     11/23~11/27
+P1 Tx                   2026-12~2027-01 (드라이버 서명 전제)
+P2 Target App Mode      2027-02~03
+P3 Full Voice Replacement   2027 Q2~ (10장 지연 기준 통과 시)
+
+비상 계획: 무료 No-Go -> B안(유료 + 가입 체험 크레딧),
+PG·법률 지연 -> C안(무료 먼저 공개, 유료는 승인 즉시 업데이트).
+
+
+[유효한 기존 상태]
+
+Browser Tab Live Translate Rx MVP
 - 상태: 완료
 - 브라우저 탭/창 오디오 캡처 완료
 - Gemini 3.5 Live Translate 연결 완료
 - generationConfig.translationConfig.targetLanguageCode 정합 완료
 - 내가 들을 언어 기준 Rx 음성 출력 smoke PASS
 - 드라이버 없이 Browser Tab Rx 사용 가능
+- 남은 후속(자막 패널 고도화, 원어 볼륨, 세션 기록, 장시간 안정성)은
+  로드맵 M2 무료 트랙에서 수행
 
-남은 후속:
-- Rx 자막 패널 고도화
-- 원어 볼륨 조절
-- 세션 기록/다운로드
-- 장시간 안정성 테스트
-
-Phase 2 — Driver Attestation + Code 52 해소
-- 상태: 진행 중
+Driver Attestation + Code 52 해소
 - attestation readiness pipeline 완료
   (ORCA-TALKSYNC-DRIVER-ATTESTATION-READINESS-PIPELINE-1,
    app main commit b507fb8, 판정 PASS_WITH_WARNINGS)
@@ -733,53 +762,16 @@ Phase 2 — Driver Attestation + Code 52 해소
 - HW ID Root\talksync_TalkSyncAudio / service TalkSyncAudio
 - endpoints: TalkSync Virtual Speaker (Rx), TalkSync Virtual Microphone (Tx)
 - current signer: WDKTestCert (dev) — Code 52 미해소
-- EV signing / Hardware Dev Center attestation 제출은 사람 승인 게이트
+- EV signing / Hardware Dev Center attestation 제출은 M0의 사람 승인 게이트
 - Microsoft-signed package 수령 후 clean VM smoke 예정
 - driver tree local-only: TabletAudioSample.vcxproj B3 packaging fix
   (app repo 밖; samples 별도 git 관리)
+- Microsoft 문서상 Attestation은 "테스트 목적" 서명으로 안내되므로
+  일반 공개 배포용 서명 경로(HLK/WHCP vs Attestation vs 상용 SDK)는
+  M2까지 조사·결정한다 (로드맵 R10). 공개 베타는 Rx 전용이라
+  드라이버는 베타 일정의 크리티컬 패스가 아니다.
 
-Phase 3 — Free Local Asymmetric Benchmark
-- 상태: 보류 (드라이버 제출 게이트 이후)
-- Direct / Lite / Quality 후보 비교
-- CPU·GPU 환경 비교
-- 번역·TTS·자막 지연 측정
-- 라이선스 manifest 작성
-
-Phase 4 — Free Closed Alpha
-- Safe Push-to-Talk 중심
-- 실제 한국어 사용자 테스트
-- 회의·Discord·게임 상황별 피드백
-- 오역·지연·장시간 안정성 측정
-
-Phase 5 — Free 공개 출시
-- Local Relay로 명확히 포지셔닝
-- 지원 PC 사양과 제한 고지
-- 자동 업데이트·오류 보고 체계 검토
-
-Phase 6 — Pro BYOK
-- 사용자 API 키 연결
-- 고품질 양방향 음성 통역
-- provider abstraction 검증
-
-Phase 7 — Pro Managed
-- 서버 프록시
-- 사용자별 계량
-- 원화 예산·세션 제한
-- 과금·환불·악용 방지
-- 공식 provider 상업 사용 조건 확인
-
-Phase 8 — Target App Mode
-- 데스크톱 앱별 오디오 캡처
-- 앱·프로세스 선택 UX
-- Discord·Zoom·Teams 검증
-
-Phase 9 — Full Voice Replacement
-- Virtual Speaker + Virtual Microphone
-- 원본 음성 대체
-- 양방향 에코·턴테이킹
-- 최종 제품화 판단
-  (Code 52 해소·clean VM smoke·종단 지연 검증 이후)
-
+상세: docs/talksync/2026-10-roadmap.md
 
 ================================================================================
 14. 현재 확정된 것과 미확정인 것
@@ -796,12 +788,17 @@ Phase 9 — Full Voice Replacement
 - TalkSync가 권리를 확보한 고정 중립 영어 음성을 사용한다.
 - 한국어 TTS는 Free v1 기본값에서 제외한다.
 - Free는 저품질 Pro가 아니라 로컬·무료·프라이버시 상품이다.
-- Pro는 BYOK와 Managed 선택지를 둔다.
+- Pro는 Managed(회사 부담 Gemini + 사용량 과금, 충전식 크레딧)를 우선한다.
+  BYOK는 후순위(개발자 플래그). (2026-10 갱신)
+- 공개 베타(2026-11 목표)는 Rx 전용, 무료 로컬 자막 + 유료 Gemini 업그레이드 동시 출시.
+  Tx는 드라이버 공개 배포용 서명 경로 확정 후 P1. (2026-10 갱신)
 - Managed에는 시간·예산·자동 중지 안전장치가 필요하다.
 - Argos Translate를 기본 엔진으로 사전 확정하지 않는다.
 - 비상업 모델 가중치를 제품에 포함하지 않는다.
 - provider 추상화를 둔다.
 - 드라이버는 제품 해자이며 조기 실증이 필요하다.
+- (2026-10) 위 Free v1 Tx/Rx·Safe PTT 정의는 P1 Tx 이후 최종형 기준이다.
+  공개 베타 Free는 Rx 전용, 모든 언어 → 사용자 언어, 언어 등급제(로드맵 5.1).
 
 
 [미확정]
@@ -817,8 +814,9 @@ Phase 9 — Full Voice Replacement
 - Virtual Microphone 종단 지연
 - 60분 이상 장시간 안정성
 - 한국어 TTS Experimental 채택 여부
-- Gemini·OpenAI 등 최종 Pro provider
-- Pro Managed 가격
+- Gemini 외 대체 Pro provider (베타는 Gemini Live Translate로 확정, 2026-10)
+- Pro Managed 가격 (시안 시간당 ₩5,000, M2 확정)
+- 드라이버 공개 배포용 서명 경로 (HLK/WHCP vs Attestation vs 상용 SDK, M2까지 결정)
 - Enterprise 온프레미스 범위
 - 기존 자체 드라이버 재사용 또는 상용 SDK 구매 여부
 
@@ -849,6 +847,7 @@ Phase 9 — Full Voice Replacement
 - 다음 티켓의 우선순위와 방향 결정은 ChatGPT 오케스트레이터가 담당한다.
 - 사용자가 명시적으로 다른 우선순위를 지정하면 사용자 지시를 우선한다.
 - 한 번에 다음 티켓 하나만 발행한다.
+  (2026-10: M0~M2는 무료·유료 트랙 병렬 — 트랙별로 다음 티켓 하나씩)
 
 일반 ChatGPT 티켓:
 - 필요 시 담당 AI와 작업 강도를 명시한다.
@@ -881,8 +880,7 @@ Git 상태:
 - app repo: C:\Users\user\Desktop\AI 툴\수익화프로젝트\talksync
 - branch: main
 - HEAD == origin/main
-- latest HEAD: b507fb88a32c9a0b873ce66167fde25a427da2c9
-  (chore: TalkSync 드라이버 attestation 제출 준비)
+- latest main HEAD: 86dd909 (2026-10-02 기준)
 - tracked product code diff: 없음
 - 잔여 문서/미추적 항목은 별도 범위로 관리
   (예: docs/qa-isolation-hard-gate-report.md dirty,
@@ -904,7 +902,7 @@ Git 상태:
 - driver readiness docs/checklist/smoke/QA report main push 완료 (b507fb8)
 - package readiness smoke PASS
 - submission readiness docs/checklist PASS
-- prepare-attestation-package.ps1 M1/M2 ship 전 수정 완료
+- prepare-attestation-package.ps1 QA-M1/QA-M2 ship 전 수정 완료
 
 현재 미해결:
 - TalkSync 자체 드라이버 Code 52 / Error / Unknown
@@ -918,8 +916,8 @@ Git 상태:
 - Free Local 엔진 Windows 벤치마크 미수행
 
 남은 warnings (attestation readiness):
-- M3 OPEN: staged package_manifest.json 부가 필드 vs script 생성 스키마 차이
-- M4 OPEN: InfVerif/ApiValidator 비활성 및 /FORCE:MULTIPLE로 로컬 InfVerif 미통과 가능
+- QA-M3 OPEN: staged package_manifest.json 부가 필드 vs script 생성 스키마 차이
+- QA-M4 OPEN: InfVerif/ApiValidator 비활성 및 /FORCE:MULTIPLE로 로컬 InfVerif 미통과 가능
 
 driver tree local-only (app repo 밖):
 - source: C:\Users\user\Desktop\TalkSync_Driver\Windows-driver-samples\audio\sysvad
@@ -927,14 +925,22 @@ driver tree local-only (app repo 밖):
 - package: package_attestation_ready_20260718 (INF+SYS+talksync.cat)
 - samples 별도 git tree면 별도 관리 필요
 
-현재 판단:
+2026-10-02 갱신:
+- 정리 브랜치 claude/project-structure-review-24a2ad (e3bf012):
+  미사용 레거시 파이프라인·IPC 삭제, studio 분리, 오디오·소켓·보안 버그 수정,
+  CI·테스트 추가 (main 병합은 M0)
+- 로드맵 재정비 승인: docs/talksync/2026-10-roadmap.md
+
+현재 판단 (2026-10 갱신):
 - VB-CABLE은 임시 fallback 또는 진단용으로 유지
-- 우선순위는 TalkSync 자체 드라이버 EV signing + HDC attestation 제출
-- Free Local Benchmark는 드라이버 제출 게이트 이후로 보류
+- 드라이버 EV signing + HDC attestation 제출은 M0 사람 게이트로 병행
+  (Microsoft 문서상 Attestation은 '테스트 목적' 안내 → 공개 배포 경로는 별도 결정)
+- Free Local Benchmark는 더 이상 드라이버 게이트에 묶이지 않는다:
+  M1(10/12~10/23) 무료 엔진 스파이크 + Go/No-Go로 병렬 진행
 
 
 ================================================================================
-18. 다음 티켓 — 하나만 실행
+18. 다음 티켓 (2026-10: M0 병렬 — 사람 게이트 1 + AI 티켓 1)
 ================================================================================
 
 HUMAN-TALKSYNC-DRIVER-EV-SIGN-AND-HDC-SUBMISSION-1
@@ -972,8 +978,15 @@ SMOKE-TALKSYNC-MICROSOFT-SIGNED-DRIVER-CLEAN-VM-1
 BLOCKED/PARTIAL 후 다음 티켓:
 FIX-TALKSYNC-DRIVER-ATTESTATION-BLOCKERS-1
 
-(보류) Free Local Bench는 드라이버 제출 게이트 이후:
-SPIKE-TALKSYNC-FREE-LOCAL-ASYMMETRIC-BENCH-1
+(2026-10 갱신) 위 드라이버 티켓은 M0 사람 게이트로 유지하되 단독 다음 티켓이 아니다.
+AI 다음 티켓: M0 P0 보안 (next 16.2.0 → 16.3.8 + npm audit).
+사람 병행: HUMAN-TALKSYNC-DRIVER-EV-SIGN-AND-HDC-SUBMISSION-1.
+M0(10/05~10/09) 병렬 작업: next 16.3.8 보안 업그레이드, 정리 브랜치 main 병합,
+PG 가맹·통신판매업·법률 검토 착수, 문서·IRU 위키 정합.
+M1 무료 트랙 티켓 (드라이버 게이트와 무관하게 진행):
+SPIKE-TALKSYNC-FREE-LOCAL-ASYMMETRIC-BENCH-1 (범위: Rx ASR+MT·utilityProcess·패키징,
+로드맵 2.3 — TTS 제외)
+상세 순서: docs/talksync/2026-10-roadmap.md
 
 
 ================================================================================
@@ -991,17 +1004,21 @@ SPIKE-TALKSYNC-FREE-LOCAL-ASYMMETRIC-BENCH-1
 - 용어집·보정 계층
 이다.
 
-다음 병목은 Tx/Full Voice를 위한 TalkSync 자체 Virtual Microphone/Speaker다.
+(Tx/Full Voice 기준) 다음 병목은 Tx/Full Voice를 위한 TalkSync 자체 Virtual Microphone/Speaker다.
 attestation-ready package(INF+SYS+talksync.cat)는 준비됐고
 app main에 readiness docs가 push됐다(b507fb8).
 그러나 Code 52는 아직 해소되지 않았다.
 해소 판단은 EV signing + Microsoft Hardware Dev Center attestation
 + clean VM smoke 이후다.
 
-Free v1 제품 포지션(비대칭 로컬 통역, Safe PTT, 고정 영어 음성)은
-유지하되, Free Local Benchmark 실행은 드라이버 제출 게이트 뒤로 미룬다.
+[2026-10 로드맵 재정비]
+1차 목표는 실사용자 검증이다. 대상은 웹 화상회의 참여자,
+공개 베타(2026-11-23~27 목표)는 Rx 전용으로
+무료 로컬 오픈소스 자막(API 키 불필요) + 유료 Gemini 업그레이드
+(회사 부담, 사용량 과금 충전식 크레딧)를 동시에 낸다.
+Free Local 엔진은 드라이버 게이트와 무관하게 M1에서 스파이크·판정한다.
+드라이버 EV signing + HDC attestation 제출은 M0 사람 게이트로 병행하고,
+Tx(P1) 공개 전 공개 배포용 서명 경로(HLK/WHCP vs Attestation vs 상용 SDK)를 정한다.
 
-다음 작업은 Free Local Benchmark가 아니라:
-HUMAN-TALKSYNC-DRIVER-EV-SIGN-AND-HDC-SUBMISSION-1
-이다.
+다음 작업: M0 (docs/talksync/2026-10-roadmap.md 2장)
 ================================================================================
