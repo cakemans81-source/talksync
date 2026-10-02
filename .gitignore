@@ -18,7 +18,9 @@
 /out/
 
 # production
-/build
+/build/*
+# electron-builder buildResources — 앱·설치 파일 아이콘은 저장소에 포함
+!/build/icon.ico
 
 # misc
 .DS_Store
